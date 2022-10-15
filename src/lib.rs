@@ -164,7 +164,10 @@ async fn check_internet_connectivity(
         message = messages.next() => message,
     } {
         match &message.payload {
-            rtnetlink::proto::NetlinkPayload::Error(_) => todo!(),
+            rtnetlink::proto::NetlinkPayload::Error(e) => {
+                return Err(rtnetlink::Error::NetlinkError(e.clone()))
+                    .with_context(|| "received rtnetlink error");
+            }
             rtnetlink::proto::NetlinkPayload::Overrun(_) => todo!(),
             rtnetlink::proto::NetlinkPayload::InnerMessage(message) => match message {
                 rtnetlink::packet::RtnlMessage::NewLink(link) => {
