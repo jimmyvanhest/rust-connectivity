@@ -80,14 +80,6 @@ struct IpState {
     addresses: HashSet<IpAddress>,
     gateways: HashSet<IpAddress>,
 }
-impl IpState {
-    fn new() -> Self {
-        Self {
-            addresses: HashSet::<IpAddress>::new(),
-            gateways: HashSet::<IpAddress>::new(),
-        }
-    }
-}
 
 /// Records the complete state for a single interface.
 #[derive(Debug)]
@@ -100,8 +92,14 @@ impl InterfaceState {
     fn new(up: bool) -> Self {
         Self {
             up,
-            ipv4: IpState::new(),
-            ipv6: IpState::new(),
+            ipv4: IpState {
+                addresses: HashSet::<IpAddress>::new(),
+                gateways: HashSet::<IpAddress>::new(),
+            },
+            ipv6: IpState {
+                addresses: HashSet::<IpAddress>::new(),
+                gateways: HashSet::<IpAddress>::new(),
+            },
         }
     }
 }
@@ -111,11 +109,11 @@ type InterfacesState = HashMap<InterfaceIndex, InterfaceState>;
 /// map [InterfacesState] to [InternetConnectivity]
 fn interfaces_state_to_internet_connectivity(state: &InterfacesState) -> InternetConnectivity {
     let ipv4 = state
-        .iter()
-        .any(|(_, s)| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty());
+        .values()
+        .any(|s| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty());
     let ipv6 = state
-        .iter()
-        .any(|(_, s)| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty());
+        .values()
+        .any(|s| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty());
 
     match (ipv4, ipv6) {
         (true, true) => InternetConnectivity::All,
@@ -227,10 +225,10 @@ async fn get_links(handle: &Handle, state: &mut InterfacesState) -> Result<(), E
 
     while let Some(link) = links.try_next().await? {
         if link.header.flags & IFF_LOOPBACK == 0 {
-            state.insert(
-                link.header.index,
-                InterfaceState::new(link.header.flags & IFF_UP != 0),
-            );
+            let s = state
+                .entry(link.header.index)
+                .or_insert_with(|| InterfaceState::new(false));
+            s.up = link.header.flags & IFF_UP != 0;
         }
     }
 
@@ -254,22 +252,13 @@ async fn get_addresses(handle: &Handle, state: &mut InterfacesState) -> Result<(
 /// Adds an address to [state](InterfacesState).
 fn add_address(address: &AddressMessage, state: &mut InterfacesState) {
     if let Some((index, ip_version, address)) = parse_address(address) {
-        state
+        let s = state
             .entry(index)
-            .and_modify(|state| {
-                match ip_version {
-                    IpVersion::V4 => state.ipv4.addresses.insert(address.to_vec()),
-                    IpVersion::V6 => state.ipv6.addresses.insert(address.to_vec()),
-                };
-            })
-            .or_insert_with(|| {
-                let mut s = InterfaceState::new(false);
-                match ip_version {
-                    IpVersion::V4 => s.ipv4.addresses.insert(address),
-                    IpVersion::V6 => s.ipv6.addresses.insert(address),
-                };
-                s
-            });
+            .or_insert_with(|| InterfaceState::new(false));
+        match ip_version {
+            IpVersion::V4 => s.ipv4.addresses.insert(address),
+            IpVersion::V6 => s.ipv6.addresses.insert(address),
+        };
     }
 }
 /// Removes an address from [state](InterfacesState).
@@ -342,22 +331,13 @@ async fn get_default_routes(
 /// Adds a default route to [state](InterfacesState).
 fn add_default_route(route: &RouteMessage, state: &mut InterfacesState) {
     if let Some((index, ip_version, address)) = parse_default_route(route) {
-        state
+        let s = state
             .entry(index)
-            .and_modify(|state| {
-                match ip_version {
-                    IpVersion::V4 => state.ipv4.gateways.insert(address.to_vec()),
-                    IpVersion::V6 => state.ipv6.gateways.insert(address.to_vec()),
-                };
-            })
-            .or_insert_with(|| {
-                let mut s = InterfaceState::new(false);
-                match ip_version {
-                    IpVersion::V4 => s.ipv4.gateways.insert(address),
-                    IpVersion::V6 => s.ipv6.gateways.insert(address),
-                };
-                s
-            });
+            .or_insert_with(|| InterfaceState::new(false));
+        match ip_version {
+            IpVersion::V4 => s.ipv4.gateways.insert(address),
+            IpVersion::V6 => s.ipv6.gateways.insert(address),
+        };
     }
 }
 /// Removes a default route from [state](InterfacesState).
