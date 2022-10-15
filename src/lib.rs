@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use futures::{channel::mpsc::UnboundedReceiver, join, stream::StreamExt, Future, TryStreamExt};
+use futures::{channel::mpsc::UnboundedReceiver, stream::StreamExt, Future, TryStreamExt};
 use log::trace;
 use rtnetlink::{
     new_connection,
@@ -65,9 +65,17 @@ pub fn new() -> Result<
 
     let driver = async {
         trace!("waiting on rtnetlink connection and connectivity checker");
-        join!(conn, checker).1?;
+        // waiting for both of these futures can be done with a select because when one finishes the other one will not do anymore meaningful work and can be dropped.
+        let r = tokio::select! {
+            biased;
+            r_check = checker => match r_check {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            },
+            _ = conn => Ok(()),
+        };
         trace!("done waiting on rtnetlink connection and connectivity checker");
-        Ok(())
+        r
     };
 
     Ok((driver, rx))
@@ -314,8 +322,11 @@ async fn check_internet_connectivity(
     tx.send(conn)?;
 
     trace!("waiting for rtnetlink messages");
+    let closed = tx.closed();
+    tokio::pin!(closed);
     while let Some((message, _)) = tokio::select! {
-        _ = tx.closed() => None,
+        biased;
+        _ = &mut closed => None,
         message = messages.next() => message,
     } {
         match &message.payload {

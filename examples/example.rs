@@ -19,8 +19,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // this will result in the completion of driver.
     info!("begin waiting on internet connectivity receiver");
     while let Some(connectivity) = tokio::select! {
+        biased;
         _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => None,
-        connectivity = rx.recv() => connectivity
+        connectivity = rx.recv() => connectivity,
     } {
         info!("detected connectivity: {:?}", connectivity);
     }
@@ -29,11 +30,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // await the driver and flatten the result type
     info!("joining internet connectivity driver task");
-    match driver.await {
+    let r = match driver.await {
         Ok(v) => match v {
             Ok(v) => Ok(v),
             Err(e) => Err(e)?,
         },
         Err(e) => Err(e)?,
-    }
+    };
+    info!("joined internet connectivity driver task");
+    r
 }
