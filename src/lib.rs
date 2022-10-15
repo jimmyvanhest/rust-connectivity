@@ -123,6 +123,12 @@ fn interfaces_state_to_internet_connectivity(state: &InterfacesState) -> Interne
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum CheckInternetConnectivityError {
+    #[error("an overrun occurred")]
+    Overrun(Vec<u8>),
+}
+
 /// Builds and updates an internal state with a subset of the information provided by rtnetlink.
 ///
 /// From this state the internet connectivity with will be determined and send to tx.
@@ -166,7 +172,10 @@ async fn check_internet_connectivity(
                 return Err(rtnetlink::Error::NetlinkError(e.clone()))
                     .with_context(|| "received rtnetlink error");
             }
-            rtnetlink::proto::NetlinkPayload::Overrun(_) => todo!(),
+            rtnetlink::proto::NetlinkPayload::Overrun(e) => {
+                return Err(CheckInternetConnectivityError::Overrun(e.clone()))
+                    .with_context(|| "an overrun was detected");
+            }
             rtnetlink::proto::NetlinkPayload::InnerMessage(message) => match message {
                 rtnetlink::packet::RtnlMessage::NewLink(link) => {
                     add_link(link, &mut state);
