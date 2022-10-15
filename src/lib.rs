@@ -33,7 +33,8 @@ pub enum InternetConnectivity {
 ///
 /// # Errors
 ///
-/// This function will return an error if the rtnetlink connection failed or memberships couldn't be added
+/// This function will return an error if the rtnetlink connection failed or memberships couldn't be added.
+/// The returned future can fail when a rtnetlink error was received.
 pub fn new() -> Result<
     (
         impl Future<Output = Result<(), Box<dyn Error + Send + Sync>>>,
@@ -41,7 +42,7 @@ pub fn new() -> Result<
     ),
     Box<dyn Error + Send + Sync>,
 > {
-    debug!("building rtnetlink connection");
+    debug!("creating rtnetlink connection");
     let (mut conn, handle, messages) = new_connection()?;
 
     debug!("add group membership for rtnetlink");
@@ -58,11 +59,10 @@ pub fn new() -> Result<
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-    debug!("building connectivity checker");
     let checker = check_internet_connectivity(handle, messages, tx);
 
     let driver = async {
-        debug!("waiting on rtnetlink connection and connectivity checker");
+        debug!("waiting on rtnetlink connection or connectivity checker");
         // waiting for both of these futures can be done with a select because when one finishes the other one will not do anymore meaningful work and can be dropped.
         let r = tokio::select! {
             biased;
@@ -72,7 +72,7 @@ pub fn new() -> Result<
             },
             _ = conn => Ok(()),
         };
-        debug!("done waiting on rtnetlink connection and connectivity checker");
+        debug!("done waiting on rtnetlink connection or connectivity checker");
         r
     };
 
@@ -155,7 +155,7 @@ fn parse_default_route(route: &RouteMessage) -> Option<RouteInfo> {
 
 #[derive(Debug, thiserror::Error)]
 enum ConnectivityError {
-    #[error("an overrun occurred with data {0:?}")]
+    #[error("An overrun occurred with data: {0:?}")]
     Overrun(Vec<u8>),
 }
 
@@ -185,13 +185,21 @@ async fn check_internet_connectivity(
     debug!("emit initial connectivity {:?}", conn);
     tx.send(conn)?;
 
-    debug!("waiting for rtnetlink messages");
+    debug!("waiting for rtnetlink messages or transmit channel closed");
     let closed = tx.closed();
     tokio::pin!(closed);
     while let Some((message, _)) = tokio::select! {
         biased;
-        _ = &mut closed => None,
-        message = messages.next() => message,
+        _ = &mut closed => {
+            debug!("transmit channel closed");
+            None
+        },
+        message = messages.next() => {
+            if message.is_none() {
+                debug!("no more rtnetlink messages");
+            }
+            message
+        },
     } {
         match &message.payload {
             rtnetlink::proto::NetlinkPayload::Error(e) => {
@@ -239,7 +247,6 @@ async fn check_internet_connectivity(
             tx.send(conn)?;
         }
     }
-    debug!("no more rtnetlink messages");
 
     Ok(())
 }
