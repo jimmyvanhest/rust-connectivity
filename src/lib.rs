@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use futures::{channel::mpsc::UnboundedReceiver, stream::StreamExt, Future, TryStreamExt};
-use log::trace;
+use log::debug;
 use rtnetlink::{
     new_connection,
     packet::{
@@ -43,10 +43,10 @@ pub fn new() -> Result<
     ),
     Box<dyn Error + Send + Sync>,
 > {
-    trace!("building rtnetlink connection");
+    debug!("building rtnetlink connection");
     let (mut conn, handle, messages) = new_connection()?;
 
-    trace!("add group membership for rtnetlink");
+    debug!("add group membership for rtnetlink");
     let groups = vec![
         RTNLGRP_LINK,
         RTNLGRP_IPV4_IFADDR,
@@ -60,11 +60,11 @@ pub fn new() -> Result<
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-    trace!("building connectivity checker");
+    debug!("building connectivity checker");
     let checker = check_internet_connectivity(handle, messages, tx);
 
     let driver = async {
-        trace!("waiting on rtnetlink connection and connectivity checker");
+        debug!("waiting on rtnetlink connection and connectivity checker");
         // waiting for both of these futures can be done with a select because when one finishes the other one will not do anymore meaningful work and can be dropped.
         let r = tokio::select! {
             biased;
@@ -74,7 +74,7 @@ pub fn new() -> Result<
             },
             _ = conn => Ok(()),
         };
-        trace!("done waiting on rtnetlink connection and connectivity checker");
+        debug!("done waiting on rtnetlink connection and connectivity checker");
         r
     };
 
@@ -309,19 +309,19 @@ async fn check_internet_connectivity(
     mut messages: UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
     tx: tokio::sync::mpsc::UnboundedSender<InternetConnectivity>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    trace!("getting initial state");
+    debug!("getting initial state");
     let mut state = InterfacesState::new();
     get_links(&handle, &mut state).await?;
     get_addresses(&handle, &mut state).await?;
     get_default_routes(&handle, IpVersion::V4, &mut state).await?;
     get_default_routes(&handle, IpVersion::V6, &mut state).await?;
-    trace!("got initial state");
+    debug!("got initial state");
 
     let mut conn = state.internet_connectivity();
-    trace!("emit initial connectivity {:?}", conn);
+    debug!("emit initial connectivity {:?}", conn);
     tx.send(conn)?;
 
-    trace!("waiting for rtnetlink messages");
+    debug!("waiting for rtnetlink messages");
     let closed = tx.closed();
     tokio::pin!(closed);
     while let Some((message, _)) = tokio::select! {
@@ -363,11 +363,11 @@ async fn check_internet_connectivity(
         let new_conn = state.internet_connectivity();
         if conn != new_conn {
             conn = new_conn;
-            trace!("emit updated connectivity {:?}", conn);
+            debug!("emit updated connectivity {:?}", conn);
             tx.send(conn)?;
         }
     }
-    trace!("no more rtnetlink messages");
+    debug!("no more rtnetlink messages");
 
     Ok(())
 }

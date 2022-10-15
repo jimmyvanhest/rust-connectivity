@@ -1,9 +1,13 @@
-use log::info;
+use env_logger::{Builder, Target};
+use log::{info, LevelFilter};
 use std::error::Error;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    env_logger::init();
+    let mut builder = Builder::new();
+    builder.filter_level(LevelFilter::Debug);
+    builder.target(Target::Stderr);
+    builder.init();
 
     // create the internet connectivity checker
     info!("creating internet connectivity checker");
