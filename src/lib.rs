@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: MIT
 
-use std::{
-    collections::{HashMap, HashSet},
-    u16,
-};
-
 use anyhow::{Context, Error, Result};
-
 use futures::{
     channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
     future::join,
     stream::StreamExt,
     Future, SinkExt, TryStreamExt,
 };
-
 use rtnetlink::{
     new_connection,
     packet::{
@@ -24,44 +17,18 @@ use rtnetlink::{
     sys::{AsyncSocket, SocketAddr},
     Handle, IpVersion,
 };
+use std::{
+    collections::{HashMap, HashSet},
+    u16,
+};
 
 /// Represents connectivity to the internet.
-#[derive(Clone, Copy)]
-pub struct InternetConnectivity {
-    ipv4: bool,
-    ipv6: bool,
-}
-impl InternetConnectivity {
-    fn new() -> Self {
-        Self {
-            ipv4: false,
-            ipv6: false,
-        }
-    }
-
-    pub fn ipv4(&self) -> bool {
-        self.ipv4
-    }
-
-    fn set_ipv4(&mut self, ipv4: bool) {
-        self.ipv4 = ipv4;
-    }
-
-    pub fn ipv6(&self) -> bool {
-        self.ipv6
-    }
-
-    fn set_ipv6(&mut self, ipv6: bool) {
-        self.ipv6 = ipv6;
-    }
-
-    pub fn any(&self) -> bool {
-        self.ipv4() || self.ipv6()
-    }
-
-    pub fn all(&self) -> bool {
-        self.ipv4() && self.ipv6()
-    }
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum InternetConnectivity {
+    None,
+    IpV4,
+    IpV6,
+    All,
 }
 
 /// Creates a connection with rtnetlink and sends connectivity updates.
@@ -141,17 +108,21 @@ impl InterfaceState {
 
 /// Maps an [InterfaceIndex] to an [InterfaceState]
 type InterfacesState = HashMap<InterfaceIndex, InterfaceState>;
-/// Check if the current representation of [state](InterfacesState) has an ipv6 connection.
-fn has_ipv4_connectivity(state: &InterfacesState) -> bool {
-    state
+/// map [InterfacesState] to [InternetConnectivity]
+fn interfaces_state_to_internet_connectivity(state: &InterfacesState) -> InternetConnectivity {
+    let ipv4 = state
         .iter()
-        .any(|(_, s)| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty())
-}
-/// Check if the current representation of [state](InterfacesState) has an ipv6 connection.
-fn has_ipv6_connectivity(state: &InterfacesState) -> bool {
-    state
+        .any(|(_, s)| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty());
+    let ipv6 = state
         .iter()
-        .any(|(_, s)| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty())
+        .any(|(_, s)| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty());
+
+    match (ipv4, ipv6) {
+        (true, true) => InternetConnectivity::All,
+        (true, false) => InternetConnectivity::IpV4,
+        (false, true) => InternetConnectivity::IpV6,
+        (false, false) => InternetConnectivity::None,
+    }
 }
 
 /// Builds and updates an internal state with a subset of the information provided by rtnetlink.
@@ -168,7 +139,6 @@ async fn check_internet_connectivity(
     mut messages: UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
     mut tx: UnboundedSender<InternetConnectivity>,
 ) -> Result<(), Error> {
-    let mut conn = InternetConnectivity::new();
     let mut state = InterfacesState::new();
 
     get_links(&handle, &mut state)
@@ -184,8 +154,7 @@ async fn check_internet_connectivity(
         .await
         .with_context(|| "get default routes ipv6 failed")?;
 
-    conn.set_ipv4(has_ipv4_connectivity(&state));
-    conn.set_ipv6(has_ipv6_connectivity(&state));
+    let mut conn = interfaces_state_to_internet_connectivity(&state);
     tx.send(conn)
         .await
         .with_context(|| "sending initial connectivity state failed")?;
@@ -233,11 +202,9 @@ async fn check_internet_connectivity(
             _ => {}
         }
 
-        let ipv4 = has_ipv4_connectivity(&state);
-        let ipv6 = has_ipv6_connectivity(&state);
-        if ipv4 != conn.ipv4() || ipv6 != conn.ipv6() {
-            conn.set_ipv4(ipv4);
-            conn.set_ipv6(ipv6);
+        let new_conn = interfaces_state_to_internet_connectivity(&state);
+        if conn != new_conn {
+            conn = new_conn;
             tx.send(conn)
                 .await
                 .with_context(|| "sending connectivity update failed")?;

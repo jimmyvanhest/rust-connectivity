@@ -14,11 +14,7 @@ async fn main() -> Result<(), Error> {
     // to stop receiving updates anyway call rx.close().
     // this will result in the completion of driver.
     while let Some(connectivity) = rx.next().await {
-        println!(
-            "detected connectivity: ipv4: {} ipv6: {}",
-            connectivity.ipv4(),
-            connectivity.ipv6()
-        );
+        println!("detected connectivity: {:?}", connectivity);
     }
 
     // await the driver and flatten the result type
