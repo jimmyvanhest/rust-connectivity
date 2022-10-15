@@ -10,11 +10,16 @@ async fn main() -> Result<(), Error> {
 
     // when there is a result from rx there was a change in internet connectivity.
     // this will only stop when an error was encountered.
-    // to stop receiving updates anyway call rx.close().
+    // to stop receiving updates anyway drop rx or call rx.close().
     // this will result in the completion of driver.
-    while let Some(connectivity) = rx.recv().await {
+    while let Some(connectivity) = tokio::select! {
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => None,
+        connectivity = rx.recv() => connectivity
+    } {
         println!("detected connectivity: {:?}", connectivity);
     }
+    println!("no activity for 5 seconds shuting down");
+    drop(rx);
 
     // await the driver and flatten the result type
     match driver
