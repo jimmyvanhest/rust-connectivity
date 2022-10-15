@@ -282,8 +282,8 @@ fn parse_default_route(
 }
 
 #[derive(Debug, thiserror::Error)]
-enum CheckInternetConnectivityError {
-    #[error("an overrun occurred")]
+enum ConnectivityError {
+    #[error("an overrun occurred with data {0:?}")]
     Overrun(Vec<u8>),
 }
 
@@ -323,7 +323,7 @@ async fn check_internet_connectivity(
                 return Err(Box::new(rtnetlink::Error::NetlinkError(e.clone())));
             }
             rtnetlink::proto::NetlinkPayload::Overrun(e) => {
-                return Err(Box::new(CheckInternetConnectivityError::Overrun(e.clone())));
+                return Err(Box::new(ConnectivityError::Overrun(e.clone())));
             }
             rtnetlink::proto::NetlinkPayload::InnerMessage(message) => match message {
                 rtnetlink::packet::RtnlMessage::NewLink(link) => {
