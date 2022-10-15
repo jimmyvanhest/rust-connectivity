@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use anyhow::{Context, Error, Result};
-use futures::{
-    channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    future::join,
-    stream::StreamExt,
-    Future, SinkExt, TryStreamExt,
-};
+use futures::{channel::mpsc::UnboundedReceiver, stream::StreamExt, Future, TryStreamExt};
 use rtnetlink::{
     new_connection,
     packet::{
@@ -42,7 +37,7 @@ pub enum InternetConnectivity {
 /// This function will return an error if the rtnetlink connection failed or memberships couldn't be added
 pub fn new() -> Result<(
     impl Future<Output = Result<(), Error>>,
-    UnboundedReceiver<InternetConnectivity>,
+    tokio::sync::mpsc::UnboundedReceiver<InternetConnectivity>,
 )> {
     let (mut conn, handle, messages) = new_connection()?;
 
@@ -57,16 +52,16 @@ pub fn new() -> Result<(
         conn.socket_mut().socket_mut().add_membership(group)?;
     }
 
-    let (tx, rx) = mpsc::unbounded();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     let checker = check_internet_connectivity(handle, messages, tx);
 
-    let fut = async {
-        join(conn, checker).await.1?;
+    let driver = async {
+        tokio::join!(conn, checker).1?;
         Ok::<(), Error>(())
     };
 
-    Ok((fut, rx))
+    Ok((driver, rx))
 }
 
 /// Represents an interface index.
@@ -295,7 +290,7 @@ enum CheckInternetConnectivityError {
 async fn check_internet_connectivity(
     handle: Handle,
     mut messages: UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
-    mut tx: UnboundedSender<InternetConnectivity>,
+    tx: tokio::sync::mpsc::UnboundedSender<InternetConnectivity>,
 ) -> Result<(), Error> {
     let mut state = InterfacesState::new();
 
@@ -314,11 +309,10 @@ async fn check_internet_connectivity(
 
     let mut conn = state.internet_connectivity();
     tx.send(conn)
-        .await
         .with_context(|| "sending initial connectivity state failed")?;
 
-    while let Some((message, _)) = futures::select! {
-        // TODO add some awaitable that resolves when the receiving side of tx is closed and let it resolve None in this select, resulting in the shutdown of this while loop
+    while let Some((message, _)) = tokio::select! {
+        _ = tx.closed() => None,
         message = messages.next() => message,
     } {
         match &message.payload {
@@ -358,7 +352,6 @@ async fn check_internet_connectivity(
         if conn != new_conn {
             conn = new_conn;
             tx.send(conn)
-                .await
                 .with_context(|| "sending connectivity update failed")?;
         }
     }

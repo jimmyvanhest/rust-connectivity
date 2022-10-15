@@ -1,5 +1,4 @@
 use anyhow::{Context, Error, Result};
-use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -13,7 +12,7 @@ async fn main() -> Result<(), Error> {
     // this will only stop when an error was encountered.
     // to stop receiving updates anyway call rx.close().
     // this will result in the completion of driver.
-    while let Some(connectivity) = rx.next().await {
+    while let Some(connectivity) = rx.recv().await {
         println!("detected connectivity: {:?}", connectivity);
     }
 
