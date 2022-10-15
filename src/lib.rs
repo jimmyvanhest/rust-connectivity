@@ -78,7 +78,7 @@ type IpAddress = Vec<u8>;
 #[derive(Debug)]
 struct IpState {
     addresses: HashSet<IpAddress>,
-    gateways: HashSet<IpAddress>,
+    gateways: HashSet<(IpAddress, u32)>,
 }
 
 /// Records the complete state for a single interface.
@@ -94,11 +94,11 @@ impl InterfaceState {
             up,
             ipv4: IpState {
                 addresses: HashSet::<IpAddress>::new(),
-                gateways: HashSet::<IpAddress>::new(),
+                gateways: HashSet::<(IpAddress, u32)>::new(),
             },
             ipv6: IpState {
                 addresses: HashSet::<IpAddress>::new(),
-                gateways: HashSet::<IpAddress>::new(),
+                gateways: HashSet::<(IpAddress, u32)>::new(),
             },
         }
     }
@@ -329,23 +329,23 @@ fn parse_address(addr: &AddressMessage) -> Option<(InterfaceIndex, IpVersion, Ip
 
 /// Adds a default route to [state](InterfacesState).
 fn add_default_route(route: &RouteMessage, state: &mut InterfacesState) {
-    if let Some((index, ip_version, address)) = parse_default_route(route) {
+    if let Some((index, ip_version, address, priority)) = parse_default_route(route) {
         let s = state
             .entry(index)
             .or_insert_with(|| InterfaceState::new(false));
         match ip_version {
-            IpVersion::V4 => s.ipv4.gateways.insert(address),
-            IpVersion::V6 => s.ipv6.gateways.insert(address),
+            IpVersion::V4 => s.ipv4.gateways.insert((address, priority)),
+            IpVersion::V6 => s.ipv6.gateways.insert((address, priority)),
         };
     }
 }
 /// Removes a default route from [state](InterfacesState).
 fn remove_default_route(route: &RouteMessage, state: &mut InterfacesState) {
-    if let Some((index, ip_version, address)) = parse_default_route(route) {
+    if let Some((index, ip_version, address, priority)) = parse_default_route(route) {
         state.entry(index).and_modify(|state| {
             match ip_version {
-                IpVersion::V4 => state.ipv4.gateways.remove(&address),
-                IpVersion::V6 => state.ipv6.gateways.remove(&address),
+                IpVersion::V4 => state.ipv4.gateways.remove(&(address, priority)),
+                IpVersion::V6 => state.ipv6.gateways.remove(&(address, priority)),
             };
         });
     }
@@ -353,7 +353,9 @@ fn remove_default_route(route: &RouteMessage, state: &mut InterfacesState) {
 /// Extract useful information from a [RouteMessage].
 ///
 /// Has a valid result when the message has an Output Interface and a Gateway attribute.
-fn parse_default_route(route: &RouteMessage) -> Option<(InterfaceIndex, IpVersion, IpAddress)> {
+fn parse_default_route(
+    route: &RouteMessage,
+) -> Option<(InterfaceIndex, IpVersion, IpAddress, u32)> {
     let oif = route.nlas.iter().find_map(|nla| {
         if let nlas::route::Nla::Oif(oif) = nla {
             Some(*oif)
@@ -368,13 +370,20 @@ fn parse_default_route(route: &RouteMessage) -> Option<(InterfaceIndex, IpVersio
             None
         }
     });
-    if let (Some(oif), Some(gateway)) = (oif, gateway) {
+    let priority = route.nlas.iter().find_map(|nla| {
+        if let nlas::route::Nla::Priority(priority) = nla {
+            Some(priority)
+        } else {
+            None
+        }
+    });
+    if let (Some(oif), Some(gateway), Some(priority)) = (oif, gateway, priority) {
         let ip_version = if u16::from(route.header.address_family) == AF_INET {
             IpVersion::V4
         } else {
             IpVersion::V6
         };
-        Some((oif, ip_version, gateway))
+        Some((oif, ip_version, gateway, *priority))
     } else {
         None
     }
