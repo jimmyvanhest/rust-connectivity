@@ -292,7 +292,7 @@ fn parse_address(addr: &AddressMessage) -> Option<(InterfaceIndex, IpVersion, Ip
         .iter()
         .find_map(|nla| {
             if let nlas::address::Nla::Flags(flags) = nla {
-                Some(*flags)
+                Some(*flags | u32::from(addr.header.flags))
             } else {
                 None
             }
