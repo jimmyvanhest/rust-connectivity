@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // create the internet connectivity checker
     info!("creating internet connectivity checker");
-    let (driver, mut rx) = connectivity::new()?;
+    let (driver, mut rx) = network_connectivity::new()?;
 
     // spawn the driver in a task to run the required IO
     info!("spawning a task to run internet connectivity driver");

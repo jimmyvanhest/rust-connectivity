@@ -1,2 +1,2 @@
 # connectivity
-An internet connectivity checker for rust build on rtnetlink.
+A network connectivity checker for rust build on rtnetlink.
