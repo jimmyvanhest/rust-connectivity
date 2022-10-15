@@ -11,7 +11,7 @@ use rtnetlink::{
     new_connection,
     packet::{
         constants::{self, *},
-        nlas, AddressMessage, RouteMessage, RtnlMessage,
+        nlas, AddressMessage, LinkMessage, RouteMessage, RtnlMessage,
     },
     proto::NetlinkMessage,
     sys::{AsyncSocket, SocketAddr},
@@ -169,22 +169,10 @@ async fn check_internet_connectivity(
             rtnetlink::proto::NetlinkPayload::Overrun(_) => todo!(),
             rtnetlink::proto::NetlinkPayload::InnerMessage(message) => match message {
                 rtnetlink::packet::RtnlMessage::NewLink(link) => {
-                    if link.header.flags & IFF_LOOPBACK == 0 {
-                        let up = link.header.flags & IFF_UP != 0;
-                        state
-                            .entry(link.header.index)
-                            .and_modify(|s| {
-                                s.up = up;
-                            })
-                            .or_insert_with(|| InterfaceState::new(up));
-                    }
+                    add_link(link, &mut state);
                 }
                 rtnetlink::packet::RtnlMessage::DelLink(link) => {
-                    if link.header.flags & IFF_LOOPBACK == 0 {
-                        state.entry(link.header.index).and_modify(|s| {
-                            s.up = false;
-                        });
-                    }
+                    remove_link(link, &mut state);
                 }
                 rtnetlink::packet::RtnlMessage::NewAddress(address) => {
                     add_address(address, &mut state);
@@ -224,17 +212,11 @@ async fn get_links(handle: &Handle, state: &mut InterfacesState) -> Result<(), E
     let mut links = handle.link().get().execute();
 
     while let Some(link) = links.try_next().await? {
-        if link.header.flags & IFF_LOOPBACK == 0 {
-            let s = state
-                .entry(link.header.index)
-                .or_insert_with(|| InterfaceState::new(false));
-            s.up = link.header.flags & IFF_UP != 0;
-        }
+        add_link(&link, state);
     }
 
     Ok(())
 }
-
 /// Gets all addresses from rtnetlink and records them in the [state](InterfacesState).
 ///
 /// # Errors
@@ -249,6 +231,41 @@ async fn get_addresses(handle: &Handle, state: &mut InterfacesState) -> Result<(
 
     Ok(())
 }
+/// Gets all default routes from rtnetlink for a specified [IpVersion] and records them in the [state](InterfacesState).
+///
+/// # Errors
+///
+/// This function will return an error if the underlying request has an error.
+async fn get_default_routes(
+    handle: &Handle,
+    ip_version: IpVersion,
+    state: &mut InterfacesState,
+) -> Result<(), Error> {
+    let mut routes = handle.route().get(ip_version).execute();
+
+    while let Some(route) = routes.try_next().await? {
+        add_default_route(&route, state);
+    }
+
+    Ok(())
+}
+
+/// Adds a link to [state](InterfacesState).
+fn add_link(link: &LinkMessage, state: &mut InterfacesState) {
+    if link.header.flags & IFF_LOOPBACK == 0 {
+        let s = state
+            .entry(link.header.index)
+            .or_insert_with(|| InterfaceState::new(false));
+        s.up = link.header.flags & IFF_LOWER_UP != 0;
+    }
+}
+/// Removes a link from [state](InterfacesState).
+fn remove_link(link: &LinkMessage, state: &mut InterfacesState) {
+    if link.header.flags & IFF_LOOPBACK == 0 {
+        state.remove(&link.header.index);
+    }
+}
+
 /// Adds an address to [state](InterfacesState).
 fn add_address(address: &AddressMessage, state: &mut InterfacesState) {
     if let Some((index, ip_version, address)) = parse_address(address) {
@@ -310,24 +327,6 @@ fn parse_address(addr: &AddressMessage) -> Option<(InterfaceIndex, IpVersion, Ip
     }
 }
 
-/// Gets all default routes from rtnetlink for a specified [IpVersion] and records them in the [state](InterfacesState).
-///
-/// # Errors
-///
-/// This function will return an error if the underlying request has an error.
-async fn get_default_routes(
-    handle: &Handle,
-    ip_version: IpVersion,
-    state: &mut InterfacesState,
-) -> Result<(), Error> {
-    let mut routes = handle.route().get(ip_version).execute();
-
-    while let Some(route) = routes.try_next().await? {
-        add_default_route(&route, state);
-    }
-
-    Ok(())
-}
 /// Adds a default route to [state](InterfacesState).
 fn add_default_route(route: &RouteMessage, state: &mut InterfacesState) {
     if let Some((index, ip_version, address)) = parse_default_route(route) {
