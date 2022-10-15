@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
+mod state;
 
+use crate::state::{AddressInfo, InterfacesState, LinkInfo, RouteInfo};
 use futures::{channel::mpsc::UnboundedReceiver, stream::StreamExt, Future, TryStreamExt};
 use log::debug;
 use rtnetlink::{
@@ -12,11 +14,7 @@ use rtnetlink::{
     sys::{AsyncSocket, SocketAddr},
     Handle, IpVersion,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-    u16,
-};
+use std::{error::Error, u16};
 
 /// Represents connectivity to the internet.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -81,142 +79,21 @@ pub fn new() -> Result<
     Ok((driver, rx))
 }
 
-/// Represents an interface index.
-type InterfaceIndex = u32;
-/// Represents an Ip Address.
-type IpAddress = Vec<u8>;
-
-/// Records the state for a specific ip type.
-#[derive(Debug)]
-struct IpState {
-    addresses: HashSet<IpAddress>,
-    gateways: HashSet<(IpAddress, u32)>,
+/// Extract useful information from a [LinkMessage].
+fn parse_link(link: &LinkMessage) -> LinkInfo {
+    (link.header.index, link.header.flags)
 }
-
-/// Records the complete state for a single interface.
-#[derive(Debug)]
-struct InterfaceState {
-    up: bool,
-    ipv4: IpState,
-    ipv6: IpState,
-}
-impl InterfaceState {
-    fn new(up: bool) -> Self {
-        Self {
-            up,
-            ipv4: IpState {
-                addresses: HashSet::<IpAddress>::new(),
-                gateways: HashSet::<(IpAddress, u32)>::new(),
-            },
-            ipv6: IpState {
-                addresses: HashSet::<IpAddress>::new(),
-                gateways: HashSet::<(IpAddress, u32)>::new(),
-            },
-        }
-    }
-}
-
-/// Maps an [InterfaceIndex] to an [InterfaceState]
-struct InterfacesState {
-    state: HashMap<InterfaceIndex, InterfaceState>,
-}
-impl InterfacesState {
-    fn new() -> Self {
-        Self {
-            state: HashMap::new(),
-        }
-    }
-    /// convert to [InternetConnectivity]
-    fn internet_connectivity(&self) -> InternetConnectivity {
-        let ipv4 = self
-            .state
-            .values()
-            .any(|s| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty());
-        let ipv6 = self
-            .state
-            .values()
-            .any(|s| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty());
-
-        match (ipv4, ipv6) {
-            (true, true) => InternetConnectivity::All,
-            (true, false) => InternetConnectivity::IpV4,
-            (false, true) => InternetConnectivity::IpV6,
-            (false, false) => InternetConnectivity::None,
-        }
-    }
-
-    /// Adds a link entry
-    fn add_link(&mut self, link: &LinkMessage) {
-        if link.header.flags & IFF_LOOPBACK == 0 {
-            let s = self
-                .state
-                .entry(link.header.index)
-                .or_insert_with(|| InterfaceState::new(false));
-            s.up = link.header.flags & IFF_LOWER_UP != 0;
-        }
-    }
-    /// Removes a link entry
-    fn remove_link(&mut self, link: &LinkMessage) {
-        if link.header.flags & IFF_LOOPBACK == 0 {
-            self.state.remove(&link.header.index);
-        }
-    }
-
-    /// Adds an address entry
-    fn add_address(&mut self, address: &AddressMessage) {
-        if let Some((index, ip_version, address)) = parse_address(address) {
-            let s = self
-                .state
-                .entry(index)
-                .or_insert_with(|| InterfaceState::new(false));
-            match ip_version {
-                IpVersion::V4 => s.ipv4.addresses.insert(address),
-                IpVersion::V6 => s.ipv6.addresses.insert(address),
-            };
-        }
-    }
-    /// Removes an address entry
-    fn remove_address(&mut self, address: &AddressMessage) {
-        if let Some((index, ip_version, address)) = parse_address(address) {
-            self.state.entry(index).and_modify(|state| {
-                match ip_version {
-                    IpVersion::V4 => state.ipv4.addresses.remove(&address),
-                    IpVersion::V6 => state.ipv6.addresses.remove(&address),
-                };
-            });
-        }
-    }
-
-    /// Adds a default route entry
-    fn add_default_route(&mut self, route: &RouteMessage) {
-        if let Some((index, ip_version, address, priority)) = parse_default_route(route) {
-            let s = self
-                .state
-                .entry(index)
-                .or_insert_with(|| InterfaceState::new(false));
-            match ip_version {
-                IpVersion::V4 => s.ipv4.gateways.insert((address, priority)),
-                IpVersion::V6 => s.ipv6.gateways.insert((address, priority)),
-            };
-        }
-    }
-    /// Removes a default route entry
-    fn remove_default_route(&mut self, route: &RouteMessage) {
-        if let Some((index, ip_version, address, priority)) = parse_default_route(route) {
-            self.state.entry(index).and_modify(|state| {
-                match ip_version {
-                    IpVersion::V4 => state.ipv4.gateways.remove(&(address, priority)),
-                    IpVersion::V6 => state.ipv6.gateways.remove(&(address, priority)),
-                };
-            });
-        }
-    }
-}
-
 /// Extract useful information from an [AddressMessage].
 ///
 /// Has a valid result if the address is not permanent and actually has an address.
-fn parse_address(addr: &AddressMessage) -> Option<(InterfaceIndex, IpVersion, IpAddress)> {
+fn parse_address(addr: &AddressMessage) -> Option<AddressInfo> {
+    let address = addr.nlas.iter().find_map(|nla| {
+        if let nlas::address::Nla::Address(address) = nla {
+            Some(address.to_vec())
+        } else {
+            None
+        }
+    });
     let flags = addr
         .nlas
         .iter()
@@ -228,24 +105,13 @@ fn parse_address(addr: &AddressMessage) -> Option<(InterfaceIndex, IpVersion, Ip
             }
         })
         .unwrap_or_else(|| addr.header.flags.into());
+    let ip_version = if u16::from(addr.header.family) == AF_INET {
+        IpVersion::V4
+    } else {
+        IpVersion::V6
+    };
     if flags & constants::IFA_F_PERMANENT == 0 {
-        let address = addr.nlas.iter().find_map(|nla| {
-            if let nlas::address::Nla::Address(address) = nla {
-                Some(address.to_vec())
-            } else {
-                None
-            }
-        });
-        if let Some(address) = address {
-            let ip_version = if u16::from(addr.header.family) == AF_INET {
-                IpVersion::V4
-            } else {
-                IpVersion::V6
-            };
-            Some((addr.header.index, ip_version, address))
-        } else {
-            None
-        }
+        address.map(|address| (addr.header.index, ip_version, address))
     } else {
         None
     }
@@ -253,9 +119,7 @@ fn parse_address(addr: &AddressMessage) -> Option<(InterfaceIndex, IpVersion, Ip
 /// Extract useful information from a [RouteMessage].
 ///
 /// Has a valid result when the message has an Output Interface and a Gateway attribute.
-fn parse_default_route(
-    route: &RouteMessage,
-) -> Option<(InterfaceIndex, IpVersion, IpAddress, u32)> {
+fn parse_default_route(route: &RouteMessage) -> Option<RouteInfo> {
     let oif = route.nlas.iter().find_map(|nla| {
         if let nlas::route::Nla::Oif(oif) = nla {
             Some(*oif)
@@ -277,12 +141,12 @@ fn parse_default_route(
             None
         }
     });
+    let ip_version = if u16::from(route.header.address_family) == AF_INET {
+        IpVersion::V4
+    } else {
+        IpVersion::V6
+    };
     if let (Some(oif), Some(gateway), Some(priority)) = (oif, gateway, priority) {
-        let ip_version = if u16::from(route.header.address_family) == AF_INET {
-            IpVersion::V4
-        } else {
-            IpVersion::V6
-        };
         Some((oif, ip_version, gateway, *priority))
     } else {
         None
@@ -338,22 +202,30 @@ async fn check_internet_connectivity(
             }
             rtnetlink::proto::NetlinkPayload::InnerMessage(message) => match message {
                 rtnetlink::packet::RtnlMessage::NewLink(link) => {
-                    state.add_link(link);
+                    state.add_link(parse_link(link));
                 }
                 rtnetlink::packet::RtnlMessage::DelLink(link) => {
-                    state.remove_link(link);
+                    state.remove_link(parse_link(link));
                 }
                 rtnetlink::packet::RtnlMessage::NewAddress(address) => {
-                    state.add_address(address);
+                    if let Some(address) = parse_address(address) {
+                        state.add_address(address);
+                    }
                 }
                 rtnetlink::packet::RtnlMessage::DelAddress(address) => {
-                    state.remove_address(address);
+                    if let Some(address) = parse_address(address) {
+                        state.remove_address(address);
+                    }
                 }
                 rtnetlink::packet::RtnlMessage::NewRoute(route) => {
-                    state.add_default_route(route);
+                    if let Some(route) = parse_default_route(route) {
+                        state.add_default_route(route);
+                    }
                 }
                 rtnetlink::packet::RtnlMessage::DelRoute(route) => {
-                    state.remove_default_route(route);
+                    if let Some(route) = parse_default_route(route) {
+                        state.remove_default_route(route);
+                    }
                 }
                 _ => {}
             },
@@ -384,7 +256,7 @@ async fn get_links(
     let mut links = handle.link().get().execute();
 
     while let Some(link) = links.try_next().await? {
-        state.add_link(&link);
+        state.add_link(parse_link(&link));
     }
 
     Ok(())
@@ -401,7 +273,9 @@ async fn get_addresses(
     let mut addresses = handle.address().get().execute();
 
     while let Some(address) = addresses.try_next().await? {
-        state.add_address(&address);
+        if let Some(address) = parse_address(&address) {
+            state.add_address(address);
+        }
     }
 
     Ok(())
@@ -419,7 +293,9 @@ async fn get_default_routes(
     let mut routes = handle.route().get(ip_version).execute();
 
     while let Some(route) = routes.try_next().await? {
-        state.add_default_route(&route);
+        if let Some(route) = parse_default_route(&route) {
+            state.add_default_route(route);
+        }
     }
 
     Ok(())
