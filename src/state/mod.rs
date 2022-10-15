@@ -1,4 +1,4 @@
-use crate::InternetConnectivity;
+use crate::{Connectivity, ConnectivityState};
 use rtnetlink::{packet::constants::*, IpVersion};
 use std::collections::{HashMap, HashSet};
 
@@ -59,23 +59,39 @@ impl InterfacesState {
         }
     }
 
-    /// Convert to [InternetConnectivity]
-    pub fn internet_connectivity(&self) -> InternetConnectivity {
-        let ipv4 = self
+    /// Convert to [Connectivity]
+    pub fn connectivity(&self) -> Connectivity {
+        let ipv4_addr_route = self
             .state
             .values()
             .any(|s| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty());
-        let ipv6 = self
+        let ipv4_addr = self
+            .state
+            .values()
+            .any(|s| s.up && !s.ipv4.addresses.is_empty());
+        let ipv4 = match (ipv4_addr, ipv4_addr_route) {
+            (true, true) => ConnectivityState::Internet,
+            (true, false) => ConnectivityState::Network,
+            (false, true) => ConnectivityState::None,
+            (false, false) => ConnectivityState::None,
+        };
+
+        let ipv6_addr_route = self
             .state
             .values()
             .any(|s| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty());
+        let ipv6_addr = self
+            .state
+            .values()
+            .any(|s| s.up && !s.ipv6.addresses.is_empty());
+        let ipv6 = match (ipv6_addr, ipv6_addr_route) {
+            (true, true) => ConnectivityState::Internet,
+            (true, false) => ConnectivityState::Network,
+            (false, true) => ConnectivityState::None,
+            (false, false) => ConnectivityState::None,
+        };
 
-        match (ipv4, ipv6) {
-            (true, true) => InternetConnectivity::All,
-            (true, false) => InternetConnectivity::IpV4,
-            (false, true) => InternetConnectivity::IpV6,
-            (false, false) => InternetConnectivity::None,
-        }
+        Connectivity { ipv4, ipv6 }
     }
 
     /// Adds a link entry

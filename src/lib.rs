@@ -18,11 +18,19 @@ use std::{error::Error, u16};
 
 /// Represents connectivity to the internet.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum InternetConnectivity {
+pub enum ConnectivityState {
+    /// No connectivity
     None,
-    IpV4,
-    IpV6,
-    All,
+    /// Connectivity to the local network
+    Network,
+    /// Connectivity to the internet
+    Internet,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct Connectivity {
+    pub ipv4: ConnectivityState,
+    pub ipv6: ConnectivityState,
 }
 
 /// Creates a connection with rtnetlink and sends connectivity updates.
@@ -38,7 +46,7 @@ pub enum InternetConnectivity {
 pub fn new() -> Result<
     (
         impl Future<Output = Result<(), Box<dyn Error + Send + Sync>>>,
-        tokio::sync::mpsc::UnboundedReceiver<InternetConnectivity>,
+        tokio::sync::mpsc::UnboundedReceiver<Connectivity>,
     ),
     Box<dyn Error + Send + Sync>,
 > {
@@ -171,7 +179,7 @@ enum ConnectivityError {
 async fn check_internet_connectivity(
     handle: Handle,
     mut messages: UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
-    tx: tokio::sync::mpsc::UnboundedSender<InternetConnectivity>,
+    tx: tokio::sync::mpsc::UnboundedSender<Connectivity>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     debug!("getting initial state");
     let mut state = InterfacesState::new();
@@ -181,7 +189,7 @@ async fn check_internet_connectivity(
     get_default_routes(&handle, IpVersion::V6, &mut state).await?;
     debug!("got initial state");
 
-    let mut conn = state.internet_connectivity();
+    let mut conn = state.connectivity();
     debug!("emit initial connectivity {:?}", conn);
     tx.send(conn)?;
 
@@ -240,7 +248,7 @@ async fn check_internet_connectivity(
             _ => {}
         }
 
-        let new_conn = state.internet_connectivity();
+        let new_conn = state.connectivity();
         if conn != new_conn {
             conn = new_conn;
             debug!("emit updated connectivity {:?}", conn);
