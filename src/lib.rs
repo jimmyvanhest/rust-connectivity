@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use anyhow::{Context, Error, Result};
-use futures::{channel::mpsc::UnboundedReceiver, stream::StreamExt, Future, TryStreamExt};
+use futures::{channel::mpsc::UnboundedReceiver, join, stream::StreamExt, Future, TryStreamExt};
 use log::trace;
 use rtnetlink::{
     new_connection,
@@ -15,6 +14,7 @@ use rtnetlink::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    error::Error,
     u16,
 };
 
@@ -36,10 +36,13 @@ pub enum InternetConnectivity {
 /// # Errors
 ///
 /// This function will return an error if the rtnetlink connection failed or memberships couldn't be added
-pub fn new() -> Result<(
-    impl Future<Output = Result<(), Error>>,
-    tokio::sync::mpsc::UnboundedReceiver<InternetConnectivity>,
-)> {
+pub fn new() -> Result<
+    (
+        impl Future<Output = Result<(), Box<dyn Error + Send + Sync>>>,
+        tokio::sync::mpsc::UnboundedReceiver<InternetConnectivity>,
+    ),
+    Box<dyn Error + Send + Sync>,
+> {
     trace!("building rtnetlink connection");
     let (mut conn, handle, messages) = new_connection()?;
 
@@ -62,9 +65,9 @@ pub fn new() -> Result<(
 
     let driver = async {
         trace!("waiting on rtnetlink connection and connectivity checker");
-        tokio::join!(conn, checker).1?;
+        join!(conn, checker).1?;
         trace!("done waiting on rtnetlink connection and connectivity checker");
-        Ok::<(), Error>(())
+        Ok(())
     };
 
     Ok((driver, rx))
@@ -297,27 +300,18 @@ async fn check_internet_connectivity(
     handle: Handle,
     mut messages: UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
     tx: tokio::sync::mpsc::UnboundedSender<InternetConnectivity>,
-) -> Result<(), Error> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     trace!("getting initial state");
     let mut state = InterfacesState::new();
-    get_links(&handle, &mut state)
-        .await
-        .with_context(|| "get links failed")?;
-    get_addresses(&handle, &mut state)
-        .await
-        .with_context(|| "get addresses failed")?;
-    get_default_routes(&handle, IpVersion::V4, &mut state)
-        .await
-        .with_context(|| "get default routes ipv4 failed")?;
-    get_default_routes(&handle, IpVersion::V6, &mut state)
-        .await
-        .with_context(|| "get default routes ipv6 failed")?;
+    get_links(&handle, &mut state).await?;
+    get_addresses(&handle, &mut state).await?;
+    get_default_routes(&handle, IpVersion::V4, &mut state).await?;
+    get_default_routes(&handle, IpVersion::V6, &mut state).await?;
     trace!("got initial state");
-         
+
     let mut conn = state.internet_connectivity();
     trace!("emit initial connectivity {:?}", conn);
-    tx.send(conn)
-        .with_context(|| "sending initial connectivity state failed")?;
+    tx.send(conn)?;
 
     trace!("waiting for rtnetlink messages");
     while let Some((message, _)) = tokio::select! {
@@ -326,12 +320,10 @@ async fn check_internet_connectivity(
     } {
         match &message.payload {
             rtnetlink::proto::NetlinkPayload::Error(e) => {
-                return Err(rtnetlink::Error::NetlinkError(e.clone()))
-                    .with_context(|| "received rtnetlink error");
+                return Err(Box::new(rtnetlink::Error::NetlinkError(e.clone())));
             }
             rtnetlink::proto::NetlinkPayload::Overrun(e) => {
-                return Err(CheckInternetConnectivityError::Overrun(e.clone()))
-                    .with_context(|| "an overrun was detected");
+                return Err(Box::new(CheckInternetConnectivityError::Overrun(e.clone())));
             }
             rtnetlink::proto::NetlinkPayload::InnerMessage(message) => match message {
                 rtnetlink::packet::RtnlMessage::NewLink(link) => {
@@ -361,8 +353,7 @@ async fn check_internet_connectivity(
         if conn != new_conn {
             conn = new_conn;
             trace!("emit updated connectivity {:?}", conn);
-            tx.send(conn)
-                .with_context(|| "sending connectivity update failed")?;
+            tx.send(conn)?;
         }
     }
     trace!("no more rtnetlink messages");
@@ -375,7 +366,10 @@ async fn check_internet_connectivity(
 /// # Errors
 ///
 /// This function will return an error if the underlying request has an error.
-async fn get_links(handle: &Handle, state: &mut InterfacesState) -> Result<(), Error> {
+async fn get_links(
+    handle: &Handle,
+    state: &mut InterfacesState,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut links = handle.link().get().execute();
 
     while let Some(link) = links.try_next().await? {
@@ -389,7 +383,10 @@ async fn get_links(handle: &Handle, state: &mut InterfacesState) -> Result<(), E
 /// # Errors
 ///
 /// This function will return an error if the underlying request has an error.
-async fn get_addresses(handle: &Handle, state: &mut InterfacesState) -> Result<(), Error> {
+async fn get_addresses(
+    handle: &Handle,
+    state: &mut InterfacesState,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut addresses = handle.address().get().execute();
 
     while let Some(address) = addresses.try_next().await? {
@@ -407,7 +404,7 @@ async fn get_default_routes(
     handle: &Handle,
     ip_version: IpVersion,
     state: &mut InterfacesState,
-) -> Result<(), Error> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut routes = handle.route().get(ip_version).execute();
 
     while let Some(route) = routes.try_next().await? {

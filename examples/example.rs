@@ -1,8 +1,8 @@
-use anyhow::{Context, Error, Result};
 use log::info;
+use std::error::Error;
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     env_logger::init();
 
     // create the internet connectivity checker
@@ -29,14 +29,11 @@ async fn main() -> Result<(), Error> {
 
     // await the driver and flatten the result type
     info!("joining internet connectivity driver task");
-    match driver
-        .await
-        .with_context(|| "internet connectivity driver join failed")
-    {
+    match driver.await {
         Ok(v) => match v {
             Ok(v) => Ok(v),
-            Err(e) => Err(e),
+            Err(e) => Err(e)?,
         },
-        Err(e) => Err(e),
+        Err(e) => Err(e)?,
     }
 }
