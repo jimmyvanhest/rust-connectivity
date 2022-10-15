@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Error, Result};
 use futures::{channel::mpsc::UnboundedReceiver, stream::StreamExt, Future, TryStreamExt};
+use log::trace;
 use rtnetlink::{
     new_connection,
     packet::{
@@ -39,8 +40,10 @@ pub fn new() -> Result<(
     impl Future<Output = Result<(), Error>>,
     tokio::sync::mpsc::UnboundedReceiver<InternetConnectivity>,
 )> {
+    trace!("building rtnetlink connection");
     let (mut conn, handle, messages) = new_connection()?;
 
+    trace!("add group membership for rtnetlink");
     let groups = vec![
         RTNLGRP_LINK,
         RTNLGRP_IPV4_IFADDR,
@@ -54,10 +57,13 @@ pub fn new() -> Result<(
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
+    trace!("building connectivity checker");
     let checker = check_internet_connectivity(handle, messages, tx);
 
     let driver = async {
+        trace!("waiting on rtnetlink connection and connectivity checker");
         tokio::join!(conn, checker).1?;
+        trace!("done waiting on rtnetlink connection and connectivity checker");
         Ok::<(), Error>(())
     };
 
@@ -292,8 +298,8 @@ async fn check_internet_connectivity(
     mut messages: UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
     tx: tokio::sync::mpsc::UnboundedSender<InternetConnectivity>,
 ) -> Result<(), Error> {
+    trace!("getting initial state");
     let mut state = InterfacesState::new();
-
     get_links(&handle, &mut state)
         .await
         .with_context(|| "get links failed")?;
@@ -306,11 +312,14 @@ async fn check_internet_connectivity(
     get_default_routes(&handle, IpVersion::V6, &mut state)
         .await
         .with_context(|| "get default routes ipv6 failed")?;
-
+    trace!("got initial state");
+         
     let mut conn = state.internet_connectivity();
+    trace!("emit initial connectivity {:?}", conn);
     tx.send(conn)
         .with_context(|| "sending initial connectivity state failed")?;
 
+    trace!("waiting for rtnetlink messages");
     while let Some((message, _)) = tokio::select! {
         _ = tx.closed() => None,
         message = messages.next() => message,
@@ -351,10 +360,12 @@ async fn check_internet_connectivity(
         let new_conn = state.internet_connectivity();
         if conn != new_conn {
             conn = new_conn;
+            trace!("emit updated connectivity {:?}", conn);
             tx.send(conn)
                 .with_context(|| "sending connectivity update failed")?;
         }
     }
+    trace!("no more rtnetlink messages");
 
     Ok(())
 }
