@@ -17,7 +17,7 @@ use rtnetlink::{
 use std::{error::Error, u16};
 
 /// Represents connectivity to the internet.
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum ConnectivityState {
     /// No connectivity
     None,

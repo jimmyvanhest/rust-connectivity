@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: MIT
 use crate::{Connectivity, ConnectivityState};
 use rtnetlink::{packet::constants::*, IpVersion};
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, cmp::max};
 
 /// Represents an interface index.
 type InterfaceIndex = u32;
@@ -12,17 +13,29 @@ type Priority = u32;
 type IpAddress = Vec<u8>;
 
 /// Required information for links
-pub type LinkInfo = (InterfaceIndex, InterfaceFlags);
+pub(crate) type LinkInfo = (InterfaceIndex, InterfaceFlags);
 /// Required information for addresses
-pub type AddressInfo = (InterfaceIndex, IpVersion, IpAddress);
+pub(crate) type AddressInfo = (InterfaceIndex, IpVersion, IpAddress);
 /// Required information for routes
-pub type RouteInfo = (InterfaceIndex, IpVersion, IpAddress, Priority);
+pub(crate) type RouteInfo = (InterfaceIndex, IpVersion, IpAddress, Priority);
 
 /// Records the state for a specific ip type.
 #[derive(Debug)]
 struct IpState {
     addresses: HashSet<IpAddress>,
     gateways: HashSet<(IpAddress, u32)>,
+}
+impl IpState {
+    /// Convert to [ConnectivityState]
+    fn connectivity_state(&self, up: bool) -> ConnectivityState {
+        let addr = up && !self.addresses.is_empty();
+        let addr_route = addr && !self.gateways.is_empty();
+        match (addr, addr_route) {
+            (false, _) => ConnectivityState::None,
+            (true, false) => ConnectivityState::Network,
+            (true, true) => ConnectivityState::Internet,
+        }
+    }
 }
 /// Records the complete state for a single interface.
 #[derive(Debug)]
@@ -32,70 +45,61 @@ struct InterfaceState {
     ipv6: IpState,
 }
 impl InterfaceState {
+    /// Create a new [InterfaceState] instance
     fn new(up: bool) -> Self {
         Self {
             up,
             ipv4: IpState {
-                addresses: HashSet::<IpAddress>::new(),
-                gateways: HashSet::<(IpAddress, u32)>::new(),
+                addresses: HashSet::new(),
+                gateways: HashSet::new(),
             },
             ipv6: IpState {
-                addresses: HashSet::<IpAddress>::new(),
-                gateways: HashSet::<(IpAddress, u32)>::new(),
+                addresses: HashSet::new(),
+                gateways: HashSet::new(),
             },
+        }
+    }
+
+    /// Convert to [Connectivity]
+    fn connectivity(&self) -> Connectivity {
+        Connectivity {
+            ipv4: self.ipv4.connectivity_state(self.up),
+            ipv6: self.ipv6.connectivity_state(self.up),
         }
     }
 }
 
 /// Records the complete state for all interfaces.
-pub struct InterfacesState {
+pub(crate) struct InterfacesState {
     state: HashMap<InterfaceIndex, InterfaceState>,
 }
 impl InterfacesState {
-    /// Create a new InterfacesState instance
-    pub fn new() -> Self {
+    /// Create a new [InterfacesState] instance
+    pub(crate) fn new() -> Self {
         Self {
             state: HashMap::new(),
         }
     }
 
     /// Convert to [Connectivity]
-    pub fn connectivity(&self) -> Connectivity {
-        let ipv4_addr_route = self
-            .state
-            .values()
-            .any(|s| s.up && !s.ipv4.addresses.is_empty() && !s.ipv4.gateways.is_empty());
-        let ipv4_addr = self
-            .state
-            .values()
-            .any(|s| s.up && !s.ipv4.addresses.is_empty());
-        let ipv4 = match (ipv4_addr, ipv4_addr_route) {
-            (true, true) => ConnectivityState::Internet,
-            (true, false) => ConnectivityState::Network,
-            (false, true) => ConnectivityState::None,
-            (false, false) => ConnectivityState::None,
+    pub(crate) fn connectivity(&self) -> Connectivity {
+        let iter = self.state.values().map(|s| s.connectivity());
+
+        let mut sum = Connectivity {
+            ipv4: ConnectivityState::None,
+            ipv6: ConnectivityState::None,
         };
 
-        let ipv6_addr_route = self
-            .state
-            .values()
-            .any(|s| s.up && !s.ipv6.addresses.is_empty() && !s.ipv6.gateways.is_empty());
-        let ipv6_addr = self
-            .state
-            .values()
-            .any(|s| s.up && !s.ipv6.addresses.is_empty());
-        let ipv6 = match (ipv6_addr, ipv6_addr_route) {
-            (true, true) => ConnectivityState::Internet,
-            (true, false) => ConnectivityState::Network,
-            (false, true) => ConnectivityState::None,
-            (false, false) => ConnectivityState::None,
-        };
+        for value in iter {
+            sum.ipv4 = max(sum.ipv4, value.ipv4);
+            sum.ipv6 = max(sum.ipv6, value.ipv6);
+        }
 
-        Connectivity { ipv4, ipv6 }
+        sum
     }
 
     /// Adds a link entry
-    pub fn add_link(&mut self, link: LinkInfo) {
+    pub(crate) fn add_link(&mut self, link: LinkInfo) {
         let (index, flags) = link;
         if flags & IFF_LOOPBACK == 0 {
             let s = self
@@ -106,13 +110,13 @@ impl InterfacesState {
         }
     }
     /// Removes a link entry
-    pub fn remove_link(&mut self, link: LinkInfo) {
+    pub(crate) fn remove_link(&mut self, link: LinkInfo) {
         let (index, _) = link;
         self.state.remove(&index);
     }
 
     /// Adds an address entry
-    pub fn add_address(&mut self, address: AddressInfo) {
+    pub(crate) fn add_address(&mut self, address: AddressInfo) {
         let (index, ip_version, address) = address;
         let s = self
             .state
@@ -124,7 +128,7 @@ impl InterfacesState {
         };
     }
     /// Removes an address entry
-    pub fn remove_address(&mut self, address: AddressInfo) {
+    pub(crate) fn remove_address(&mut self, address: AddressInfo) {
         let (index, ip_version, address) = address;
         self.state.entry(index).and_modify(|state| {
             match ip_version {
@@ -135,7 +139,7 @@ impl InterfacesState {
     }
 
     /// Adds a default route entry
-    pub fn add_default_route(&mut self, route: RouteInfo) {
+    pub(crate) fn add_default_route(&mut self, route: RouteInfo) {
         let (index, ip_version, address, priority) = route;
         let s = self
             .state
@@ -147,7 +151,7 @@ impl InterfacesState {
         };
     }
     /// Removes a default route entry
-    pub fn remove_default_route(&mut self, route: RouteInfo) {
+    pub(crate) fn remove_default_route(&mut self, route: RouteInfo) {
         let (index, ip_version, address, priority) = route;
         self.state.entry(index).and_modify(|state| {
             match ip_version {
