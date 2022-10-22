@@ -13,12 +13,15 @@ keywords = ["network", "connectivity"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+cfg-if = "1.0.0"
 futures = "0.3.24"
 log = "0.4.17"
-rtnetlink = "0.11.0"
 thiserror = "1.0.37"
 tokio = { version = "1.21.2", features = ["macros", "sync"] }
 
 [dev-dependencies]
 env_logger = "0.9.1"
 tokio = { version = "1.21.2", features = ["time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.11.0"

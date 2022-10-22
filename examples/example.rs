@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 use env_logger::{Builder, Target};
 use log::{info, LevelFilter};
 use std::error::Error;
