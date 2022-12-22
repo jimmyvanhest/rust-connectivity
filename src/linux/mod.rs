@@ -17,6 +17,18 @@ use rtnetlink::{
 };
 use std::{error::Error, fmt::Display};
 
+fn diff_assign<T>(assign: &mut T, assignee: T) -> bool
+where
+    T: Eq,
+{
+    if *assign != assignee {
+        *assign = assignee;
+        true
+    } else {
+        false
+    }
+}
+
 /// Creates a connection with rtnetlink and sends connectivity updates.
 ///
 /// # Returns
@@ -243,9 +255,7 @@ async fn check_internet_connectivity(
             _ => {}
         }
 
-        let new_conn = state.connectivity();
-        if conn != new_conn {
-            conn = new_conn;
+        if diff_assign(&mut conn, state.connectivity()) {
             debug!("emit updated connectivity {:?}", conn);
             tx.send(conn)?;
         }
