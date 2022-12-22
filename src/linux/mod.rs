@@ -60,16 +60,16 @@ pub(crate) fn new() -> Result<
     let driver = async {
         debug!("waiting on rtnetlink connection or connectivity checker");
         // waiting for both of these futures can be done with a select because when one finishes the other one will not do anymore meaningful work and can be dropped.
-        let r = tokio::select! {
+        tokio::select! {
             biased;
-            r_check = checker => match r_check {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e),
+            r_check = checker => {
+                r_check?;
             },
-            _ = conn => Ok(()),
+            _ = conn => (),
         };
         debug!("done waiting on rtnetlink connection or connectivity checker");
-        r
+
+        Ok(())
     };
 
     Ok((driver, rx))
@@ -85,11 +85,11 @@ fn parse_link(link: &LinkMessage) -> LinkInfo {
 fn parse_address(addr: &AddressMessage) -> Option<AddressInfo> {
     let address = addr.nlas.iter().find_map(|nla| {
         if let nlas::address::Nla::Address(address) = nla {
-            Some(address.to_vec())
+            Some(address)
         } else {
             None
         }
-    });
+    })?;
     let flags = addr
         .nlas
         .iter()
@@ -100,53 +100,49 @@ fn parse_address(addr: &AddressMessage) -> Option<AddressInfo> {
                 None
             }
         })
-        .unwrap_or_else(|| addr.header.flags.into());
-    let ip_version = if u16::from(addr.header.family) == AF_INET {
-        IpVersion::V4
-    } else {
-        IpVersion::V6
-    };
+        .unwrap_or_else(|| u32::from(addr.header.flags));
     if flags & constants::IFA_F_PERMANENT == 0 {
-        address.map(|address| (addr.header.index, ip_version, address))
+        let ip_version = if u16::from(addr.header.family) == AF_INET {
+            IpVersion::V4
+        } else {
+            IpVersion::V6
+        };
+        Some((addr.header.index, ip_version, address.to_vec()))
     } else {
         None
     }
 }
 /// Extract useful information from a [RouteMessage].
 ///
-/// Has a valid result when the message has an Output Interface and a Gateway attribute.
+/// Has a valid result when the message has an Output Interface, Gateway, and priority.
 fn parse_default_route(route: &RouteMessage) -> Option<RouteInfo> {
     let oif = route.nlas.iter().find_map(|nla| {
         if let nlas::route::Nla::Oif(oif) = nla {
-            Some(*oif)
+            Some(oif)
         } else {
             None
         }
-    });
+    })?;
     let gateway = route.nlas.iter().find_map(|nla| {
         if let nlas::route::Nla::Gateway(address) = nla {
-            Some(address.to_vec())
+            Some(address)
         } else {
             None
         }
-    });
+    })?;
     let priority = route.nlas.iter().find_map(|nla| {
         if let nlas::route::Nla::Priority(priority) = nla {
             Some(priority)
         } else {
             None
         }
-    });
+    })?;
     let ip_version = if u16::from(route.header.address_family) == AF_INET {
         IpVersion::V4
     } else {
         IpVersion::V6
     };
-    if let (Some(oif), Some(gateway), Some(priority)) = (oif, gateway, priority) {
-        Some((oif, ip_version, gateway, *priority))
-    } else {
-        None
-    }
+    Some((*oif, ip_version, gateway.to_vec(), *priority))
 }
 
 #[derive(Debug)]

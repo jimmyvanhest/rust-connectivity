@@ -38,13 +38,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // await the driver and flatten the result type
     info!("joining internet connectivity driver task");
-    let r = match driver.await {
-        Ok(v) => match v {
-            Ok(v) => Ok(v),
-            Err(e) => Err(e)?,
-        },
-        Err(e) => Err(e)?,
-    };
+    driver.await??;
     info!("joined internet connectivity driver task");
-    r
+
+    Ok(())
 }
