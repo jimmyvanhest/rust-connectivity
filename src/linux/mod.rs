@@ -15,7 +15,7 @@ use rtnetlink::{
     sys::{AsyncSocket, SocketAddr},
     Handle, IpVersion,
 };
-use std::error::Error;
+use std::{error::Error, fmt::Display};
 
 /// Creates a connection with rtnetlink and sends connectivity updates.
 ///
@@ -149,11 +149,22 @@ fn parse_default_route(route: &RouteMessage) -> Option<RouteInfo> {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 enum ConnectivityError {
-    #[error("An overrun occurred with data: {0:?}")]
     Overrun(Vec<u8>),
 }
+impl Display for ConnectivityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectivityError::Overrun(data) => {
+                write!(f, "An rtnetlink overrun occurred with data: {0:?}", data)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+impl Error for ConnectivityError {}
 
 /// Builds and updates an internal state with a subset of the information provided by rtnetlink.
 ///
