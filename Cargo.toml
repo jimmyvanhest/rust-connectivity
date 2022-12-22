@@ -20,7 +20,7 @@ thiserror = "1.0.37"
 tokio = { version = "1.21.2", features = ["macros", "sync"] }
 
 [dev-dependencies]
-env_logger = "0.9.1"
+env_logger = "0.10.0"
 tokio = { version = "1.21.2", features = ["time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

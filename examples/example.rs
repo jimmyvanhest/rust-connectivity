@@ -6,8 +6,11 @@ use std::error::Error;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut builder = Builder::new();
-    builder.filter_level(LevelFilter::Debug);
+    builder.filter_level(LevelFilter::Info);
+    builder.filter_module("network_connectivity", LevelFilter::Trace);
+    builder.filter_module("example", LevelFilter::Trace);
     builder.target(Target::Stderr);
+    builder.format_timestamp_micros();
     builder.init();
 
     // create the internet connectivity checker
