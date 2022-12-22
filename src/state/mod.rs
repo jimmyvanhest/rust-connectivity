@@ -83,19 +83,18 @@ impl InterfacesState {
 
     /// Convert to [Connectivity]
     pub(crate) fn connectivity(&self) -> Connectivity {
-        let iter = self.state.values().map(|s| s.connectivity());
-
-        let mut sum = Connectivity {
-            ipv4: ConnectivityState::None,
-            ipv6: ConnectivityState::None,
-        };
-
-        for value in iter {
-            sum.ipv4 = max(sum.ipv4, value.ipv4);
-            sum.ipv6 = max(sum.ipv6, value.ipv6);
-        }
-
-        sum
+        self.state.values().fold(
+            Connectivity {
+                ipv4: ConnectivityState::None,
+                ipv6: ConnectivityState::None,
+            },
+            |mut accumulator, interface_state| {
+                let interface_connectivity = interface_state.connectivity();
+                accumulator.ipv4 = max(accumulator.ipv4, interface_connectivity.ipv4);
+                accumulator.ipv6 = max(accumulator.ipv6, interface_connectivity.ipv6);
+                accumulator
+            },
+        )
     }
 
     /// Adds a link entry
