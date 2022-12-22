@@ -28,12 +28,19 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     info!("begin waiting on internet connectivity receiver");
     while let Some(connectivity) = tokio::select! {
         biased;
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => None,
-        connectivity = rx.recv() => connectivity,
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+            info!("no activity for 5 seconds shuting down");
+            None
+        },
+        connectivity = rx.recv() => {
+            if connectivity.is_none() {
+                info!("internet connectivity receiver was closed");
+            }
+            connectivity
+        },
     } {
         info!("detected connectivity: {:?}", connectivity);
     }
-    info!("no activity for 5 seconds shuting down");
     drop(rx);
 
     // await the driver and flatten the result type
