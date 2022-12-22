@@ -34,9 +34,9 @@ pub struct Connectivity {
 /// # Returns
 ///
 /// The return value consists of a future that must be awaited and the receive end of a channel through which connectivity updates are received.
-/// 
+///
 /// # Notes
-/// 
+///
 /// When the receive end of the channel is dropped, the future will run to completion.
 ///
 /// # Errors
@@ -52,7 +52,7 @@ pub fn new() -> Result<
 > {
     cfg_if::cfg_if! {
         if #[cfg(target_os = "linux")] {
-            return linux::new();
+            linux::new()
         } else {
             compile_error!("This crate has no implementation for this configuration.");
         }

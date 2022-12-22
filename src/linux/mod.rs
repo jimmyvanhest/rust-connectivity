@@ -36,9 +36,9 @@ where
 /// The return value consists of a future that must be awaited and the receive end of a channel through which connectivity updates are received.
 ///
 /// # Notes
-/// 
+///
 /// When the receive end of the channel is dropped, the future will run to completion.
-/// 
+///
 /// # Errors
 ///
 /// This function will return an error if the rtnetlink connection failed or memberships couldn't be added.

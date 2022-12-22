@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 use crate::{Connectivity, ConnectivityState};
 use rtnetlink::{packet::constants::*, IpVersion};
-use std::{collections::{HashMap, HashSet}, cmp::max};
+use std::{
+    cmp::max,
+    collections::{HashMap, HashSet},
+};
 
 /// Represents an interface index.
 type InterfaceIndex = u32;
