@@ -1,34 +1,34 @@
 // SPDX-License-Identifier: MIT
 use crate::{Connectivity, ConnectivityState};
-use rtnetlink::{packet::constants::*, IpVersion};
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
 /// Represents an interface index.
 type InterfaceIndex = u32;
-/// Represents interface flags.
-type InterfaceFlags = u32;
+/// Boolean indicating an interface is a loopback device
+type LoopBack = bool;
+/// Boolean indicating an interface has a carrier
+type Carrier = bool;
 /// Represents a route priority.
 type Priority = u32;
-/// Represents an Ip Address.
-type IpAddress = Vec<u8>;
 
 /// Required information for links
-pub(crate) type LinkInfo = (InterfaceIndex, InterfaceFlags);
+pub(crate) type LinkInfo = (InterfaceIndex, LoopBack, Carrier);
 /// Required information for addresses
-pub(crate) type AddressInfo = (InterfaceIndex, IpVersion, IpAddress);
+pub(crate) type AddressInfo = (InterfaceIndex, IpAddr);
 /// Required information for routes
-pub(crate) type RouteInfo = (InterfaceIndex, IpVersion, IpAddress, Priority);
+pub(crate) type RouteInfo = (InterfaceIndex, IpAddr, Priority);
 
 /// Records the state for a specific ip type.
 #[derive(Debug)]
-struct IpState {
-    addresses: HashSet<IpAddress>,
-    gateways: HashSet<(IpAddress, u32)>,
+struct IpState<T> {
+    addresses: HashSet<T>,
+    gateways: HashSet<(T, Priority)>,
 }
-impl IpState {
+impl<T> IpState<T> {
     /// Convert to [ConnectivityState]
     fn connectivity_state(&self, up: bool) -> ConnectivityState {
         let addr = up && !self.addresses.is_empty();
@@ -44,8 +44,8 @@ impl IpState {
 #[derive(Debug)]
 struct InterfaceState {
     up: bool,
-    ipv4: IpState,
-    ipv6: IpState,
+    ipv4: IpState<Ipv4Addr>,
+    ipv6: IpState<Ipv6Addr>,
 }
 impl InterfaceState {
     /// Create a new [InterfaceState] instance
@@ -102,63 +102,63 @@ impl InterfacesState {
 
     /// Adds a link entry
     pub(crate) fn add_link(&mut self, link: LinkInfo) {
-        let (index, flags) = link;
-        if flags & IFF_LOOPBACK == 0 {
+        let (index, loop_back, carrier) = link;
+        if !loop_back {
             let s = self
                 .state
                 .entry(index)
                 .or_insert_with(|| InterfaceState::new(false));
-            s.up = flags & IFF_LOWER_UP != 0;
+            s.up = carrier;
         }
     }
     /// Removes a link entry
     pub(crate) fn remove_link(&mut self, link: LinkInfo) {
-        let (index, _) = link;
+        let (index, _, _) = link;
         self.state.remove(&index);
     }
 
     /// Adds an address entry
     pub(crate) fn add_address(&mut self, address: AddressInfo) {
-        let (index, ip_version, address) = address;
-        let s = self
+        let (index, address) = address;
+        let entry = self
             .state
             .entry(index)
             .or_insert_with(|| InterfaceState::new(false));
-        match ip_version {
-            IpVersion::V4 => s.ipv4.addresses.insert(address),
-            IpVersion::V6 => s.ipv6.addresses.insert(address),
+        match address {
+            IpAddr::V4(address) => entry.ipv4.addresses.insert(address),
+            IpAddr::V6(address) => entry.ipv6.addresses.insert(address),
         };
     }
     /// Removes an address entry
     pub(crate) fn remove_address(&mut self, address: AddressInfo) {
-        let (index, ip_version, address) = address;
-        self.state.entry(index).and_modify(|state| {
-            match ip_version {
-                IpVersion::V4 => state.ipv4.addresses.remove(&address),
-                IpVersion::V6 => state.ipv6.addresses.remove(&address),
+        let (index, address) = address;
+        self.state.entry(index).and_modify(|entry| {
+            match address {
+                IpAddr::V4(address) => entry.ipv4.addresses.remove(&address),
+                IpAddr::V6(address) => entry.ipv6.addresses.remove(&address),
             };
         });
     }
 
     /// Adds a default route entry
     pub(crate) fn add_default_route(&mut self, route: RouteInfo) {
-        let (index, ip_version, address, priority) = route;
-        let s = self
+        let (index, address, priority) = route;
+        let entry = self
             .state
             .entry(index)
             .or_insert_with(|| InterfaceState::new(false));
-        match ip_version {
-            IpVersion::V4 => s.ipv4.gateways.insert((address, priority)),
-            IpVersion::V6 => s.ipv6.gateways.insert((address, priority)),
+        match address {
+            IpAddr::V4(address) => entry.ipv4.gateways.insert((address, priority)),
+            IpAddr::V6(address) => entry.ipv6.gateways.insert((address, priority)),
         };
     }
     /// Removes a default route entry
     pub(crate) fn remove_default_route(&mut self, route: RouteInfo) {
-        let (index, ip_version, address, priority) = route;
-        self.state.entry(index).and_modify(|state| {
-            match ip_version {
-                IpVersion::V4 => state.ipv4.gateways.remove(&(address, priority)),
-                IpVersion::V6 => state.ipv6.gateways.remove(&(address, priority)),
+        let (index, address, priority) = route;
+        self.state.entry(index).and_modify(|entry| {
+            match address {
+                IpAddr::V4(address) => entry.ipv4.gateways.remove(&(address, priority)),
+                IpAddr::V6(address) => entry.ipv6.gateways.remove(&(address, priority)),
             };
         });
     }

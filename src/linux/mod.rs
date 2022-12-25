@@ -15,7 +15,15 @@ use rtnetlink::{
     sys::{AsyncSocket, SocketAddr},
     Handle, IpVersion,
 };
-use std::{error::Error, fmt::Display};
+use std::{
+    error::Error,
+    fmt::Display,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
+
+fn vec_to_array<T, const N: usize>(v: Vec<T>) -> Result<[T; N], Vec<T>> {
+    v.try_into()
+}
 
 fn diff_assign<T>(assign: &mut T, assignee: T) -> bool
 where
@@ -89,7 +97,11 @@ pub(crate) fn new() -> Result<
 
 /// Extract useful information from a [LinkMessage].
 fn parse_link(link: &LinkMessage) -> LinkInfo {
-    (link.header.index, link.header.flags)
+    (
+        link.header.index,
+        link.header.flags & IFF_LOOPBACK != 0,
+        link.header.flags & IFF_LOWER_UP != 0,
+    )
 }
 /// Extract useful information from an [AddressMessage].
 ///
@@ -113,13 +125,17 @@ fn parse_address(addr: &AddressMessage) -> Option<AddressInfo> {
             }
         })
         .unwrap_or_else(|| u32::from(addr.header.flags));
+    let ip_address = match u16::from(addr.header.family) {
+        AF_INET => Some(IpAddr::V4(Ipv4Addr::from(
+            vec_to_array(address.to_vec()).ok()?,
+        ))),
+        AF_INET6 => Some(IpAddr::V6(Ipv6Addr::from(
+            vec_to_array(address.to_vec()).ok()?,
+        ))),
+        _ => None,
+    }?;
     if flags & constants::IFA_F_PERMANENT == 0 {
-        let ip_version = if u16::from(addr.header.family) == AF_INET {
-            IpVersion::V4
-        } else {
-            IpVersion::V6
-        };
-        Some((addr.header.index, ip_version, address.to_vec()))
+        Some((addr.header.index, ip_address))
     } else {
         None
     }
@@ -149,12 +165,16 @@ fn parse_default_route(route: &RouteMessage) -> Option<RouteInfo> {
             None
         }
     })?;
-    let ip_version = if u16::from(route.header.address_family) == AF_INET {
-        IpVersion::V4
-    } else {
-        IpVersion::V6
-    };
-    Some((*oif, ip_version, gateway.to_vec(), *priority))
+    let ip_address = match u16::from(route.header.address_family) {
+        AF_INET => Some(IpAddr::V4(Ipv4Addr::from(
+            vec_to_array(gateway.to_vec()).ok()?,
+        ))),
+        AF_INET6 => Some(IpAddr::V6(Ipv6Addr::from(
+            vec_to_array(gateway.to_vec()).ok()?,
+        ))),
+        _ => None,
+    }?;
+    Some((*oif, ip_address, *priority))
 }
 
 #[derive(Debug)]
