@@ -216,9 +216,9 @@ async fn check_internet_connectivity(
     get_default_routes(&handle, IpVersion::V6, &mut state).await?;
     debug!("got initial state");
 
-    let mut conn = state.connectivity();
-    debug!("emit initial connectivity {:?}", conn);
-    tx.send(conn)?;
+    let mut connectivity = state.connectivity();
+    debug!("emit initial connectivity {:?}", connectivity);
+    tx.send(connectivity)?;
 
     debug!("waiting for rtnetlink messages or transmit channel closed");
     let closed = tx.closed();
@@ -275,9 +275,9 @@ async fn check_internet_connectivity(
             _ => {}
         }
 
-        if diff_assign(&mut conn, state.connectivity()) {
-            debug!("emit updated connectivity {:?}", conn);
-            tx.send(conn)?;
+        if diff_assign(&mut connectivity, state.connectivity()) {
+            debug!("emit updated connectivity {:?}", connectivity);
+            tx.send(connectivity)?;
         }
     }
 
