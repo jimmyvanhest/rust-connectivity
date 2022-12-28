@@ -112,6 +112,7 @@ impl InterfacesState {
         }
     }
     /// Removes a link entry
+    #[cfg(any(target_os = "linux"))]
     pub(crate) fn remove_link(&mut self, link: LinkInfo) {
         let (index, _, _) = link;
         self.state.remove(&index);
@@ -130,6 +131,7 @@ impl InterfacesState {
         };
     }
     /// Removes an address entry
+    #[cfg(any(target_os = "linux"))]
     pub(crate) fn remove_address(&mut self, address: AddressInfo) {
         let (index, address) = address;
         self.state.entry(index).and_modify(|entry| {
@@ -153,6 +155,7 @@ impl InterfacesState {
         };
     }
     /// Removes a default route entry
+    #[cfg(any(target_os = "linux"))]
     pub(crate) fn remove_default_route(&mut self, route: RouteInfo) {
         let (index, address, priority) = route;
         self.state.entry(index).and_modify(|entry| {

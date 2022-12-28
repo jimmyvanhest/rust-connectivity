@@ -4,6 +4,9 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod state;
 
 use futures::Future;
@@ -53,6 +56,8 @@ pub fn new() -> Result<
     cfg_if::cfg_if! {
         if #[cfg(target_os = "linux")] {
             linux::new()
+        } else if #[cfg(target_os = "windows")] {
+            windows::new()
         } else {
             compile_error!("This crate has no implementation for this configuration.");
         }
