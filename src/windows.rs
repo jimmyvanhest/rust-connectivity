@@ -40,7 +40,7 @@ unsafe fn sockaddr_inet_to_ip_addr(from: &SOCKADDR_INET) -> Option<IpAddr> {
 }
 
 impl InterfacesState {
-    fn from_system() -> Result<InterfacesState, Box<dyn Error>> {
+    fn from_system() -> Result<InterfacesState, Box<dyn Error + Send + Sync>> {
         let mut state = InterfacesState::new();
 
         unsafe {
@@ -151,7 +151,7 @@ pub(crate) fn new() -> Result<
     let (tx, rx) = unbounded_channel();
     let sender_state = Box::new(SenderState {
         tx,
-        state: InterfacesState::new(),
+        state: InterfacesState::from_system()?,
     });
 
     {
