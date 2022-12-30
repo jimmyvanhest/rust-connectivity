@@ -6,7 +6,6 @@ use log::debug;
 use std::{
     error::Error,
     ffi::c_void,
-    mem::transmute,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ptr::null_mut,
 };
@@ -44,8 +43,8 @@ impl InterfacesState {
         let mut state = InterfacesState::new();
 
         unsafe {
-            let interfaces = null_mut::<MIB_IF_TABLE2>();
-            GetIfTable2(transmute(&interfaces))?;
+            let mut interfaces = null_mut::<MIB_IF_TABLE2>();
+            GetIfTable2(&mut interfaces as *mut *mut MIB_IF_TABLE2)?;
             if let Some(interfaces) = interfaces.as_ref() {
                 for index in 0..interfaces.NumEntries as usize {
                     let interface = interfaces.Table.get_unchecked(index);
@@ -56,12 +55,15 @@ impl InterfacesState {
                     ));
                 }
             }
-            FreeMibTable(transmute(interfaces));
+            FreeMibTable(interfaces as *const c_void);
         }
 
         unsafe {
-            let addresses = null_mut::<MIB_UNICASTIPADDRESS_TABLE>();
-            GetUnicastIpAddressTable(AF_UNSPEC.0 as u16, transmute(&addresses))?;
+            let mut addresses = null_mut::<MIB_UNICASTIPADDRESS_TABLE>();
+            GetUnicastIpAddressTable(
+                AF_UNSPEC.0 as u16,
+                &mut addresses as *mut *mut MIB_UNICASTIPADDRESS_TABLE,
+            )?;
             if let Some(addresses) = addresses.as_ref() {
                 for index in 0..addresses.NumEntries as usize {
                     let address = addresses.Table.get_unchecked(index);
@@ -73,19 +75,23 @@ impl InterfacesState {
                     }
                 }
             }
-            FreeMibTable(transmute(addresses));
+            FreeMibTable(addresses as *const c_void);
         }
 
         unsafe {
-            let routes = null_mut::<MIB_IPFORWARD_TABLE2>();
-            GetIpForwardTable2(AF_UNSPEC.0 as u16, transmute(routes))?;
+            let mut routes = null_mut::<MIB_IPFORWARD_TABLE2>();
+            GetIpForwardTable2(
+                AF_UNSPEC.0 as u16,
+                &mut routes as *mut *mut MIB_IPFORWARD_TABLE2,
+            )?;
             if let Some(routes) = routes.as_ref() {
                 'outer: for index in 0..routes.NumEntries as usize {
                     let route = routes.Table.get_unchecked(index);
                     if route.DestinationPrefix.PrefixLength != 0 {
                         continue;
                     }
-                    let prefix: *const u8 = transmute(&route.DestinationPrefix.Prefix);
+                    let prefix =
+                        &route.DestinationPrefix.Prefix as *const SOCKADDR_INET as *const u8;
                     for index in 0..std::mem::size_of_val(&route.DestinationPrefix.Prefix) as isize
                     {
                         match prefix.offset(index).as_ref() {
@@ -101,13 +107,12 @@ impl InterfacesState {
                     }
                     state.add_default_route((
                         route.InterfaceIndex,
-                        sockaddr_inet_to_ip_addr(&route.NextHop)
-                            .ok_or_else(|| "Not an ip address.")?,
+                        sockaddr_inet_to_ip_addr(&route.NextHop).ok_or("Not an ip address.")?,
                         route.Metric,
                     ));
                 }
             }
-            FreeMibTable(transmute(routes));
+            FreeMibTable(routes as *const c_void);
         }
         Ok(state)
     }
@@ -120,7 +125,7 @@ unsafe extern "system" fn connectivity_changed(
     notification_type: MIB_NOTIFICATION_TYPE,
 ) {
     debug!("got ip interface change notification");
-    let sender_state = transmute::<_, *const SenderState>(caller_context).cast_mut();
+    let sender_state = caller_context as *mut SenderState;
     if let Some(sender_state) = sender_state.as_mut() {
         let connectivity = sender_state.state.connectivity();
         #[allow(non_upper_case_globals)]
@@ -166,7 +171,7 @@ pub(crate) fn new() -> Result<
         NotifyIpInterfaceChange(
             AF_UNSPEC.0 as u16,
             Some(connectivity_changed),
-            Some(transmute(&*sender_state)),
+            Some(&*sender_state as *const SenderState as *const std::ffi::c_void),
             true,
             &mut handle,
         )?;

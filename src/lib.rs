@@ -4,10 +4,10 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "windows")]
-mod windows;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod state;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use futures::Future;
 use std::error::Error;
