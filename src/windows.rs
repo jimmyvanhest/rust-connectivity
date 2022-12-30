@@ -149,7 +149,7 @@ pub(crate) fn new() -> Result<
     Box<dyn Error + Send + Sync>,
 > {
     let (tx, rx) = unbounded_channel();
-    let sender_state = Box::new(SenderState {
+    let sender_state = Box::pin(SenderState {
         tx,
         state: InterfacesState::from_system()?,
     });
