@@ -4,6 +4,7 @@ version = "1.0.0"
 authors = ["Jimmy van Hest <jimmyvanhest@gmail.com>"]
 edition = "2021"
 rust-version = "1.63.0"
+categories = ["network-programming"]
 description = "A network connectivity notification module."
 readme = "README.md"
 repository = "https://github.com/jimmyvanhest/rust-network-connectivity"

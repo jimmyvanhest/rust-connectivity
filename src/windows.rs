@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
 
-use crate::{state::InterfacesState, Connectivity};
+//! The windows implementation for this crate.
+
+use crate::{state::Interfaces, Connectivity};
+use core::{
+    ffi::c_void,
+    mem::size_of_val,
+    ptr::{addr_of, addr_of_mut, null_mut},
+};
 use futures::Future;
-use log::debug;
+use log::{debug, warn};
 use std::{
     error::Error,
-    ffi::c_void,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ptr::null_mut,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use windows::Win32::{
@@ -25,128 +30,154 @@ use windows::Win32::{
     Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_INET},
 };
 
+/// Struct with named fields containing the sender channel and the current state
 struct SenderState {
+    /// The transmit end of a channel to send notifications to
     tx: UnboundedSender<Connectivity>,
-    state: InterfacesState,
+    /// The current interfaces state
+    state: Interfaces,
 }
 
+/// Try to convert a win32 [`SOCKADDR_INET`] to an [`IpAddr`]
 unsafe fn sockaddr_inet_to_ip_addr(from: &SOCKADDR_INET) -> Option<IpAddr> {
-    match ADDRESS_FAMILY(from.si_family as u32) {
+    match ADDRESS_FAMILY(u32::from(from.si_family)) {
         AF_INET => Some(IpAddr::from(Ipv4Addr::from(from.Ipv4.sin_addr))),
         AF_INET6 => Some(IpAddr::from(Ipv6Addr::from(from.Ipv6.sin6_addr))),
         _ => None,
     }
 }
 
-impl InterfacesState {
-    fn from_system() -> Result<InterfacesState, Box<dyn Error + Send + Sync>> {
-        let mut state = InterfacesState::new();
+/// Build the interfaces state from the
+fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> {
+    let mut state = Interfaces::new();
 
-        unsafe {
-            let mut interfaces = null_mut::<MIB_IF_TABLE2>();
-            GetIfTable2(&mut interfaces as *mut *mut MIB_IF_TABLE2)?;
-            if let Some(interfaces) = interfaces.as_ref() {
-                for index in 0..interfaces.NumEntries as usize {
-                    let interface = interfaces.Table.get_unchecked(index);
-                    state.add_link((
-                        interface.InterfaceIndex,
-                        interface.Type == IF_TYPE_SOFTWARE_LOOPBACK,
-                        interface.OperStatus == IfOperStatusUp,
-                    ));
+    // SAFETY:
+    // Invoking an unsafe windows api
+    // interfaces_pointer must be cleaned up at the end
+    unsafe {
+        let mut interfaces_pointer = null_mut::<MIB_IF_TABLE2>();
+        GetIfTable2(addr_of_mut!(interfaces_pointer))?;
+        if let Some(interfaces) = interfaces_pointer.as_ref() {
+            for index in 0..interfaces.NumEntries.try_into()? {
+                let interface = interfaces.Table.get_unchecked(index);
+                state.add_link((
+                    interface.InterfaceIndex,
+                    interface.Type == IF_TYPE_SOFTWARE_LOOPBACK,
+                    interface.OperStatus == IfOperStatusUp,
+                ));
+            }
+        }
+        FreeMibTable(interfaces_pointer.cast::<c_void>().cast_const());
+    }
+
+    // SAFETY:
+    // Invoking an unsafe windows api
+    // addresses_pointer must be cleaned up at the end
+    unsafe {
+        let mut addresses_pointer = null_mut::<MIB_UNICASTIPADDRESS_TABLE>();
+        GetUnicastIpAddressTable(AF_UNSPEC.0.try_into()?, addr_of_mut!(addresses_pointer))?;
+        if let Some(addresses) = addresses_pointer.as_ref() {
+            for index in 0..addresses.NumEntries.try_into()? {
+                let address = addresses.Table.get_unchecked(index);
+                if address.ValidLifetime == 0xffff_ffff {
+                    continue;
+                }
+                if let Some(addr) = sockaddr_inet_to_ip_addr(&address.Address) {
+                    state.add_address((address.InterfaceIndex, addr));
                 }
             }
-            FreeMibTable(interfaces as *const c_void);
         }
+        FreeMibTable(addresses_pointer.cast::<c_void>().cast_const());
+    }
 
-        unsafe {
-            let mut addresses = null_mut::<MIB_UNICASTIPADDRESS_TABLE>();
-            GetUnicastIpAddressTable(
-                AF_UNSPEC.0 as u16,
-                &mut addresses as *mut *mut MIB_UNICASTIPADDRESS_TABLE,
-            )?;
-            if let Some(addresses) = addresses.as_ref() {
-                for index in 0..addresses.NumEntries as usize {
-                    let address = addresses.Table.get_unchecked(index);
-                    if address.ValidLifetime == 0xffffffff {
-                        continue;
-                    }
-                    if let Some(addr) = sockaddr_inet_to_ip_addr(&address.Address) {
-                        state.add_address((address.InterfaceIndex, addr));
-                    }
+    // SAFETY:
+    // Invoking an unsafe windows api
+    // routes_pointer must be cleaned up at the end
+    unsafe {
+        let mut routes_pointer = null_mut::<MIB_IPFORWARD_TABLE2>();
+        GetIpForwardTable2(AF_UNSPEC.0.try_into()?, addr_of_mut!(routes_pointer))?;
+        if let Some(routes) = routes_pointer.as_ref() {
+            'outer: for index in 0..routes.NumEntries.try_into()? {
+                let route = routes.Table.get_unchecked(index);
+                if route.DestinationPrefix.PrefixLength != 0 {
+                    continue;
                 }
-            }
-            FreeMibTable(addresses as *const c_void);
-        }
-
-        unsafe {
-            let mut routes = null_mut::<MIB_IPFORWARD_TABLE2>();
-            GetIpForwardTable2(
-                AF_UNSPEC.0 as u16,
-                &mut routes as *mut *mut MIB_IPFORWARD_TABLE2,
-            )?;
-            if let Some(routes) = routes.as_ref() {
-                'outer: for index in 0..routes.NumEntries as usize {
-                    let route = routes.Table.get_unchecked(index);
-                    if route.DestinationPrefix.PrefixLength != 0 {
-                        continue;
-                    }
-                    let prefix =
-                        &route.DestinationPrefix.Prefix as *const SOCKADDR_INET as *const u8;
-                    for index in 0..std::mem::size_of_val(&route.DestinationPrefix.Prefix) as isize
-                    {
-                        match prefix.offset(index).as_ref() {
-                            Some(prefix) => {
-                                if *prefix != 0 {
-                                    continue 'outer;
-                                }
-                            }
-                            None => {
+                let prefix = addr_of!(route.DestinationPrefix.Prefix).cast::<u8>();
+                for prefix_index in 0..size_of_val(&route.DestinationPrefix.Prefix) {
+                    match prefix.offset(prefix_index.try_into()?).as_ref() {
+                        Some(prefix_element) => {
+                            if *prefix_element != 0 {
                                 continue 'outer;
                             }
                         }
+                        None => {
+                            continue 'outer;
+                        }
                     }
-                    state.add_default_route((
-                        route.InterfaceIndex,
-                        sockaddr_inet_to_ip_addr(&route.NextHop).ok_or("Not an ip address.")?,
-                        route.Metric,
-                    ));
                 }
+                state.add_default_route((
+                    route.InterfaceIndex,
+                    sockaddr_inet_to_ip_addr(&route.NextHop).ok_or("Not an ip address.")?,
+                    route.Metric,
+                ));
             }
-            FreeMibTable(routes as *const c_void);
         }
-        Ok(state)
+        FreeMibTable(routes_pointer.cast::<c_void>().cast_const());
     }
+    Ok(state)
 }
 
 #[no_mangle]
+/// Callback function for `NotifyIpInterfaceChange`
 unsafe extern "system" fn connectivity_changed(
     caller_context: *const c_void,
     _: *const MIB_IPINTERFACE_ROW,
     notification_type: MIB_NOTIFICATION_TYPE,
 ) {
     debug!("got ip interface change notification");
-    let sender_state = caller_context as *mut SenderState;
-    if let Some(sender_state) = sender_state.as_mut() {
+    let sender_state_pointer = caller_context.cast::<SenderState>().cast_mut();
+    if let Some(sender_state) = sender_state_pointer.as_mut() {
         let connectivity = sender_state.state.connectivity();
         #[allow(non_upper_case_globals)]
         match notification_type {
             MibParameterNotification
             | MibAddInstance
             | MibDeleteInstance
-            | MibInitialNotification => {
-                sender_state.state = InterfacesState::from_system().unwrap();
-            }
+            | MibInitialNotification => match interfaces_from_system() {
+                Ok(new_state) => {
+                    sender_state.state = new_state;
+                }
+                Err(error) => {
+                    warn!("interfaces_from_system failed {error}");
+                }
+            },
             _ => {}
         };
         let new_connectivity = sender_state.state.connectivity();
         if connectivity != new_connectivity {
-            debug!("emit updated connectivity {:?}", new_connectivity);
-            sender_state.tx.send(new_connectivity).unwrap();
+            debug!("emit updated connectivity {new_connectivity:?}");
+            if let Err(error) = sender_state.tx.send(new_connectivity) {
+                warn!("failed to emit {error}");
+            }
         }
     }
 }
 
-pub(crate) fn new() -> Result<
+/// Subscribes some functions to the windows api and sends connectivity updates.
+///
+/// # Returns
+///
+/// The return value consists of a future that must be awaited and the receive end of a channel through which connectivity updates are received.
+///
+/// # Notes
+///
+/// When the receive end of the channel is dropped, the future will run to completion.
+///
+/// # Errors
+///
+/// This function will return an error if the subscription failed.
+/// The returned future can fail when a cleanup of the subscription failed.
+pub fn new() -> Result<
     (
         impl Future<Output = Result<(), Box<dyn Error + Send + Sync>>>,
         UnboundedReceiver<Connectivity>,
@@ -156,7 +187,7 @@ pub(crate) fn new() -> Result<
     let (tx, rx) = unbounded_channel();
     let sender_state = Box::pin(SenderState {
         tx,
-        state: InterfacesState::from_system()?,
+        state: interfaces_from_system()?,
     });
 
     {
@@ -167,11 +198,15 @@ pub(crate) fn new() -> Result<
 
     debug!("creating ip interface change notification");
     let mut handle = HANDLE::default();
+    // SAFETY:
+    // Invoking an unsafe windows api
+    // sender_state must be stationary in memory
+    // handle must be cleaned up when there is no more interest in the notification
     unsafe {
         NotifyIpInterfaceChange(
-            AF_UNSPEC.0 as u16,
+            AF_UNSPEC.0.try_into()?,
             Some(connectivity_changed),
-            Some(&*sender_state as *const SenderState as *const std::ffi::c_void),
+            Some(addr_of!(*sender_state).cast::<c_void>()),
             true,
             &mut handle,
         )?;
@@ -181,6 +216,8 @@ pub(crate) fn new() -> Result<
         debug!("waiting on sender closed");
         sender_state.tx.closed().await;
         debug!("canceling ip interface change notification");
+        // SAFETY:
+        // cleanup of handle for earlier unsafe windows api
         unsafe {
             CancelMibChangeNotify2(handle)?;
         }

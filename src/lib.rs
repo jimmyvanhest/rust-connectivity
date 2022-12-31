@@ -2,6 +2,14 @@
 
 //! This crate allows you to receive network connectivity updates through a channel.
 
+#![warn(clippy::cargo, clippy::nursery, clippy::pedantic, clippy::restriction)]
+#![allow(
+    clippy::blanket_clippy_restriction_lints,
+    clippy::implicit_return,
+    clippy::missing_inline_in_public_items,
+    clippy::missing_trait_methods
+)]
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -14,6 +22,7 @@ use std::error::Error;
 
 /// Represents connectivity to the internet.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum ConnectivityState {
     /// No connectivity
     None,
@@ -25,6 +34,7 @@ pub enum ConnectivityState {
 
 /// Represents connectivity to the internet separated by ipv4 and ipv6.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Connectivity {
     /// Ipv4 connectivity
     pub ipv4: ConnectivityState,
