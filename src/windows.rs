@@ -115,11 +115,9 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
                         }
                     }
                 }
-                state.add_default_route((
-                    route.InterfaceIndex,
-                    sockaddr_inet_to_ip_addr(&route.NextHop).ok_or("Not an ip address.")?,
-                    route.Metric,
-                ));
+                if let Some(gateway) = sockaddr_inet_to_ip_addr(&route.NextHop) {
+                    state.add_default_route((route.InterfaceIndex, gateway, route.Metric));
+                }
             }
         }
         FreeMibTable(routes_pointer.cast::<c_void>().cast_const());
