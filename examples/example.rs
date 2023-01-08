@@ -3,6 +3,8 @@ use env_logger::{Builder, Target};
 use log::{info, LevelFilter};
 use std::error::Error;
 
+const SLEEP_TIME: i32 = 5;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut builder = Builder::new();
@@ -28,8 +30,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     info!("begin waiting on internet connectivity receiver");
     while let Some(connectivity) = tokio::select! {
         biased;
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-            info!("no activity for 5 seconds shuting down");
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(SLEEP_TIME as u64)) => {
+            info!("no activity for {SLEEP_TIME} seconds shuting down");
             None
         },
         connectivity = rx.recv() => {
