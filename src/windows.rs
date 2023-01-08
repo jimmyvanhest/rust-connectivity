@@ -13,6 +13,8 @@ use log::{debug, warn};
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops::BitAnd,
+    sync::Mutex,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use windows::Win32::{
@@ -33,9 +35,9 @@ use windows::Win32::{
 /// Struct with named fields containing the sender channel and the current state
 struct SenderState {
     /// The transmit end of a channel to send notifications to
-    tx: UnboundedSender<Connectivity>,
+    tx: Mutex<UnboundedSender<Connectivity>>,
     /// The current interfaces state
-    state: Interfaces,
+    state: Mutex<Interfaces>,
 }
 
 /// Try to convert a win32 [`SOCKADDR_INET`] to an [`IpAddr`]
@@ -45,6 +47,15 @@ unsafe fn sockaddr_inet_to_ip_addr(from: &SOCKADDR_INET) -> Option<IpAddr> {
         AF_INET6 => Some(IpAddr::from(Ipv6Addr::from(from.Ipv6.sin6_addr))),
         _ => None,
     }
+}
+
+/// Checks if bit is set
+fn is_set<T>(val: T, bit_pos: u32) -> bool
+where
+    T: BitAnd<Output = T> + From<u32> + PartialEq + Copy,
+{
+    let mask = (1 << bit_pos).into();
+    val & mask == mask
 }
 
 /// Build the interfaces state from the
@@ -60,11 +71,15 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
         if let Some(interfaces) = interfaces_pointer.as_ref() {
             for index in 0..interfaces.NumEntries.try_into()? {
                 let interface = interfaces.Table.get_unchecked(index);
-                state.add_link((
-                    interface.InterfaceIndex,
-                    interface.Type == IF_TYPE_SOFTWARE_LOOPBACK,
-                    interface.OperStatus == IfOperStatusUp,
-                ));
+                let is_hardware_interface =
+                    is_set(interface.InterfaceAndOperStatusFlags._bitfield as u32, 0);
+                if is_hardware_interface {
+                    state.add_link((
+                        interface.InterfaceIndex,
+                        interface.Type == IF_TYPE_SOFTWARE_LOOPBACK,
+                        interface.OperStatus == IfOperStatusUp,
+                    ));
+                }
             }
         }
         FreeMibTable(interfaces_pointer.cast::<c_void>().cast_const());
@@ -79,11 +94,14 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
         if let Some(addresses) = addresses_pointer.as_ref() {
             for index in 0..addresses.NumEntries.try_into()? {
                 let address = addresses.Table.get_unchecked(index);
-                if address.ValidLifetime == 0xffff_ffff {
-                    continue;
-                }
-                if let Some(addr) = sockaddr_inet_to_ip_addr(&address.Address) {
-                    state.add_address((address.InterfaceIndex, addr));
+                match (
+                    sockaddr_inet_to_ip_addr(&address.Address),
+                    address.ValidLifetime,
+                ) {
+                    (Some(ip_address), lifetime) if lifetime != 0xffff_ffff => {
+                        state.add_address((address.InterfaceIndex, ip_address));
+                    }
+                    (_, _) => {}
                 }
             }
         }
@@ -99,11 +117,12 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
         if let Some(routes) = routes_pointer.as_ref() {
             'outer: for index in 0..routes.NumEntries.try_into()? {
                 let route = routes.Table.get_unchecked(index);
+                // when both elements of DestinationPrefix only contain zero(excluding the first byte of the prefix itself), the route is considered default.
                 if route.DestinationPrefix.PrefixLength != 0 {
                     continue;
                 }
                 let prefix = addr_of!(route.DestinationPrefix.Prefix).cast::<u8>();
-                for prefix_index in 0..size_of_val(&route.DestinationPrefix.Prefix) {
+                for prefix_index in 1..size_of_val(&route.DestinationPrefix.Prefix) {
                     match prefix.offset(prefix_index.try_into()?).as_ref() {
                         Some(prefix_element) => {
                             if *prefix_element != 0 {
@@ -122,6 +141,7 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
         }
         FreeMibTable(routes_pointer.cast::<c_void>().cast_const());
     }
+
     Ok(state)
 }
 
@@ -132,30 +152,44 @@ unsafe extern "system" fn connectivity_changed(
     _: *const MIB_IPINTERFACE_ROW,
     notification_type: MIB_NOTIFICATION_TYPE,
 ) {
-    debug!("got ip interface change notification");
     let sender_state_pointer = caller_context.cast::<SenderState>().cast_mut();
     if let Some(sender_state) = sender_state_pointer.as_mut() {
-        let connectivity = sender_state.state.connectivity();
-        #[allow(non_upper_case_globals)]
-        match notification_type {
-            MibParameterNotification
-            | MibAddInstance
-            | MibDeleteInstance
-            | MibInitialNotification => match interfaces_from_system() {
-                Ok(new_state) => {
-                    sender_state.state = new_state;
-                }
-                Err(error) => {
-                    warn!("interfaces_from_system failed {error}");
-                }
-            },
-            _ => {}
-        };
-        let new_connectivity = sender_state.state.connectivity();
-        if connectivity != new_connectivity {
-            debug!("emit updated connectivity {new_connectivity:?}");
-            if let Err(error) = sender_state.tx.send(new_connectivity) {
-                warn!("failed to emit {error}");
+        match sender_state.state.lock() {
+            Ok(mut state) => {
+                #[allow(non_upper_case_globals)]
+                match notification_type {
+                    MibParameterNotification
+                    | MibAddInstance
+                    | MibDeleteInstance
+                    | MibInitialNotification => match interfaces_from_system() {
+                        Ok(new_state) => {
+                            let new_connectivity = new_state.connectivity();
+                            if state.connectivity() != new_connectivity {
+                                debug!("emit updated connectivity {new_connectivity:?}");
+                                match sender_state.tx.lock() {
+                                    Ok(tx) => match tx.send(new_connectivity) {
+                                        Ok(_) => {
+                                            *state = new_state;
+                                        }
+                                        Err(tx_send_error) => {
+                                            warn!("failed to emit {tx_send_error}");
+                                        }
+                                    },
+                                    Err(tx_lock_error) => {
+                                        warn!("failed to lock tx: {tx_lock_error}");
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!("interfaces_from_system failed {error}");
+                        }
+                    },
+                    _ => {}
+                };
+            }
+            Err(state_lock_error) => {
+                warn!("failed to lock state: {state_lock_error}");
             }
         }
     }
@@ -184,14 +218,22 @@ pub fn new() -> Result<
 > {
     let (tx, rx) = unbounded_channel();
     let sender_state = Box::pin(SenderState {
-        tx,
-        state: interfaces_from_system()?,
+        tx: Mutex::new(tx),
+        state: Mutex::new(interfaces_from_system()?),
     });
 
     {
-        let connectivity = sender_state.state.connectivity();
-        debug!("emit initial connectivity {:?}", connectivity);
-        sender_state.tx.send(connectivity)?;
+        let connectivity = sender_state
+            .state
+            .lock()
+            .map_err(|error| error.to_string())?
+            .connectivity();
+        debug!("emitting initial connectivity {:?}", connectivity);
+        sender_state
+            .tx
+            .lock()
+            .map_err(|error| error.to_string())?
+            .send(connectivity)?;
     }
 
     debug!("creating ip interface change notification");
@@ -205,14 +247,19 @@ pub fn new() -> Result<
             AF_UNSPEC.0.try_into()?,
             Some(connectivity_changed),
             Some(addr_of!(*sender_state).cast::<c_void>()),
-            true,
+            false,
             &mut handle,
         )?;
     }
 
     let driver = async move {
+        let tx = sender_state
+            .tx
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone();
         debug!("waiting on sender closed");
-        sender_state.tx.closed().await;
+        tx.closed().await;
         debug!("canceling ip interface change notification");
         // SAFETY:
         // cleanup of handle for earlier unsafe windows api
