@@ -13,7 +13,6 @@ use log::{debug, warn};
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops::BitAnd,
     sync::Mutex,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -49,15 +48,6 @@ unsafe fn sockaddr_inet_to_ip_addr(from: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
-/// Checks if bit is set
-fn is_set<T>(val: T, bit_pos: u32) -> bool
-where
-    T: BitAnd<Output = T> + From<u32> + PartialEq + Copy,
-{
-    let mask = (1 << bit_pos).into();
-    val & mask == mask
-}
-
 /// Build the interfaces state from the
 fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> {
     let mut state = Interfaces::new();
@@ -71,8 +61,9 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
         if let Some(interfaces) = interfaces_pointer.as_ref() {
             for index in 0..interfaces.NumEntries.try_into()? {
                 let interface = interfaces.Table.get_unchecked(index);
+                #[allow(clippy::used_underscore_binding)]
                 let is_hardware_interface =
-                    is_set(interface.InterfaceAndOperStatusFlags._bitfield as u32, 0);
+                    interface.InterfaceAndOperStatusFlags._bitfield & 1 == 1;
                 if is_hardware_interface {
                     state.add_link((
                         interface.InterfaceIndex,
@@ -145,6 +136,31 @@ fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> 
     Ok(state)
 }
 
+/// the handler function for `connectivity_changed` that returns a result which writes better to read code.
+unsafe fn handle_connectivity_changed(
+    caller_context: *const c_void,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let sender_state_pointer = caller_context.cast::<SenderState>().cast_mut();
+    if let Some(sender_state) = sender_state_pointer.as_mut() {
+        let mut state = sender_state
+            .state
+            .lock()
+            .map_err(|error| format!("failed to lock state: {error}"))?;
+        let new_state = interfaces_from_system()?;
+        let new_connectivity = new_state.connectivity();
+        if state.connectivity() != new_connectivity {
+            debug!("emitting updated connectivity {new_connectivity:?}");
+            sender_state
+                .tx
+                .lock()
+                .map_err(|error| format!("failed to lock sender: {error}"))?
+                .send(new_connectivity)?;
+            *state = new_state;
+        }
+    }
+    Ok(())
+}
+
 #[no_mangle]
 /// Callback function for `NotifyIpInterfaceChange`
 unsafe extern "system" fn connectivity_changed(
@@ -152,46 +168,14 @@ unsafe extern "system" fn connectivity_changed(
     _: *const MIB_IPINTERFACE_ROW,
     notification_type: MIB_NOTIFICATION_TYPE,
 ) {
-    let sender_state_pointer = caller_context.cast::<SenderState>().cast_mut();
-    if let Some(sender_state) = sender_state_pointer.as_mut() {
-        match sender_state.state.lock() {
-            Ok(mut state) => {
-                #[allow(non_upper_case_globals)]
-                match notification_type {
-                    MibParameterNotification
-                    | MibAddInstance
-                    | MibDeleteInstance
-                    | MibInitialNotification => match interfaces_from_system() {
-                        Ok(new_state) => {
-                            let new_connectivity = new_state.connectivity();
-                            if state.connectivity() != new_connectivity {
-                                debug!("emit updated connectivity {new_connectivity:?}");
-                                match sender_state.tx.lock() {
-                                    Ok(tx) => match tx.send(new_connectivity) {
-                                        Ok(_) => {
-                                            *state = new_state;
-                                        }
-                                        Err(tx_send_error) => {
-                                            warn!("failed to emit {tx_send_error}");
-                                        }
-                                    },
-                                    Err(tx_lock_error) => {
-                                        warn!("failed to lock tx: {tx_lock_error}");
-                                    }
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!("interfaces_from_system failed {error}");
-                        }
-                    },
-                    _ => {}
-                };
-            }
-            Err(state_lock_error) => {
-                warn!("failed to lock state: {state_lock_error}");
+    #[allow(non_upper_case_globals)]
+    match notification_type {
+        MibParameterNotification | MibAddInstance | MibDeleteInstance | MibInitialNotification => {
+            if let Err(error) = handle_connectivity_changed(caller_context) {
+                warn!("handle_connectivity_changed failed {error}");
             }
         }
+        _ => {}
     }
 }
 
@@ -253,13 +237,13 @@ pub fn new() -> Result<
     }
 
     let driver = async move {
-        let tx = sender_state
+        let locked_tx = sender_state
             .tx
             .lock()
             .map_err(|error| error.to_string())?
             .clone();
         debug!("waiting on sender closed");
-        tx.closed().await;
+        locked_tx.closed().await;
         debug!("canceling ip interface change notification");
         // SAFETY:
         // cleanup of handle for earlier unsafe windows api
