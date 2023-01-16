@@ -35,8 +35,8 @@ use windows::Win32::{
 struct SenderState {
     /// The transmit end of a channel to send notifications to
     tx: Mutex<UnboundedSender<Connectivity>>,
-    /// The current interfaces state
-    state: Mutex<Interfaces>,
+    /// The current connectivity
+    state: Mutex<Connectivity>,
 }
 
 /// Try to convert a win32 [`SOCKADDR_INET`] to an [`IpAddr`]
@@ -148,14 +148,14 @@ unsafe fn handle_connectivity_changed(
             .map_err(|error| format!("failed to lock state: {error}"))?;
         let new_state = interfaces_from_system()?;
         let new_connectivity = new_state.connectivity();
-        if state.connectivity() != new_connectivity {
+        if *state != new_connectivity {
             debug!("emitting updated connectivity {new_connectivity:?}");
             sender_state
                 .tx
                 .lock()
                 .map_err(|error| format!("failed to lock sender: {error}"))?
                 .send(new_connectivity)?;
-            *state = new_state;
+            *state = new_connectivity;
         }
     }
     Ok(())
@@ -201,17 +201,13 @@ pub fn new() -> Result<
     Box<dyn Error + Send + Sync>,
 > {
     let (tx, rx) = unbounded_channel();
+    let connectivity = interfaces_from_system()?.connectivity();
     let sender_state = Box::pin(SenderState {
         tx: Mutex::new(tx),
-        state: Mutex::new(interfaces_from_system()?),
+        state: Mutex::new(connectivity),
     });
 
     {
-        let connectivity = sender_state
-            .state
-            .lock()
-            .map_err(|error| error.to_string())?
-            .connectivity();
         debug!("emitting initial connectivity {:?}", connectivity);
         sender_state
             .tx
