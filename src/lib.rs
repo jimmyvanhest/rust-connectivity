@@ -42,6 +42,28 @@ pub struct Connectivity {
     pub ipv6: ConnectivityState,
 }
 
+impl Connectivity {
+    /// Get the highest connectivity state of any ip type
+    #[allow(clippy::must_use_candidate)]
+    pub fn any(&self) -> ConnectivityState {
+        if self.ipv4 > self.ipv6 {
+            self.ipv4
+        } else {
+            self.ipv6
+        }
+    }
+
+    /// Get the lowest connectivity state of any ip type
+    #[allow(clippy::must_use_candidate)]
+    pub fn all(&self) -> ConnectivityState {
+        if self.ipv4 < self.ipv6 {
+            self.ipv4
+        } else {
+            self.ipv6
+        }
+    }
+}
+
 /// Creates a driver that sends connectivity updates to a channel.
 ///
 /// # Returns
