@@ -2,19 +2,15 @@
 
 //! The windows implementation for this crate.
 
-use crate::{state::Interfaces, Connectivity};
+use crate::{Connectivity, ConnectivityState};
 use core::{
+    cmp::max,
     ffi::c_void,
-    mem::size_of_val,
     ptr::{addr_of, addr_of_mut, null_mut},
 };
 use futures::Future;
 use log::{debug, warn};
-use std::{
-    error::Error,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::Mutex,
-};
+use std::{error::Error, sync::Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use windows::Win32::{
     Foundation::HANDLE,
@@ -23,7 +19,8 @@ use windows::Win32::{
             CancelMibChangeNotify2, FreeMibTable, GetIfTable2, GetIpForwardTable2,
             GetUnicastIpAddressTable, MibAddInstance, MibDeleteInstance, MibInitialNotification,
             MibParameterNotification, NotifyIpInterfaceChange, IF_TYPE_SOFTWARE_LOOPBACK,
-            MIB_IF_TABLE2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE,
+            MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+            MIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE, MIB_UNICASTIPADDRESS_ROW,
             MIB_UNICASTIPADDRESS_TABLE,
         },
         Ndis::IfOperStatusUp,
@@ -39,101 +36,180 @@ struct SenderState {
     state: Mutex<Connectivity>,
 }
 
-/// Try to convert a win32 [`SOCKADDR_INET`] to an [`IpAddr`]
-unsafe fn sockaddr_inet_to_ip_addr(from: &SOCKADDR_INET) -> Option<IpAddr> {
-    match ADDRESS_FAMILY(u32::from(from.si_family)) {
-        AF_INET => Some(IpAddr::from(Ipv4Addr::from(from.Ipv4.sin_addr))),
-        AF_INET6 => Some(IpAddr::from(Ipv6Addr::from(from.Ipv6.sin6_addr))),
-        _ => None,
+/// Wrapper around windows MIB_*_TABLE* structures which calls `FreeMibTable` on drop
+struct MibTable<T> {
+    /// The table this wrapper points to
+    pointer: *mut T,
+}
+impl<T> Drop for MibTable<T> {
+    fn drop(&mut self) {
+        // SAFETY:
+        // pointer was created using an unsafe windows api and should be freed as such
+        unsafe {
+            FreeMibTable(self.pointer.cast::<c_void>().cast_const());
+        }
     }
 }
-
-/// Build the interfaces state from the
-fn interfaces_from_system() -> Result<Interfaces, Box<dyn Error + Send + Sync>> {
-    let mut state = Interfaces::new();
-
-    // SAFETY:
-    // Invoking an unsafe windows api
-    // interfaces_pointer must be cleaned up at the end
-    unsafe {
-        let mut interfaces_pointer = null_mut::<MIB_IF_TABLE2>();
-        GetIfTable2(addr_of_mut!(interfaces_pointer))?;
-        if let Some(interfaces) = interfaces_pointer.as_ref() {
-            for index in 0..interfaces.NumEntries.try_into()? {
-                let interface = interfaces.Table.get_unchecked(index);
-                #[allow(clippy::used_underscore_binding)]
-                let is_hardware_interface =
-                    interface.InterfaceAndOperStatusFlags._bitfield & 1 == 1;
-                if is_hardware_interface {
-                    state.add_link((
-                        interface.InterfaceIndex,
-                        interface.Type == IF_TYPE_SOFTWARE_LOOPBACK,
-                        interface.OperStatus == IfOperStatusUp,
-                    ));
+/// Iterator for `MibTable`
+#[derive(Clone)]
+struct MibTableIter<'a, T> {
+    /// The table for this iterator
+    table: &'a MibTable<T>,
+    /// the next index for this iterator
+    next_index: u32,
+}
+/// Helper macro for creating new `MibTable` structures
+macro_rules! create_mib_table_new {
+    ($table:ty,$getter:expr) => {
+        impl MibTable<$table> {
+            fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+                // SAFETY:
+                // getter is an unsafe windows api that should be dropped with `FreeMibTable`
+                unsafe {
+                    let mut pointer = null_mut::<$table>();
+                    $getter(addr_of_mut!(pointer))?;
+                    Ok(Self { pointer })
                 }
             }
         }
-        FreeMibTable(interfaces_pointer.cast::<c_void>().cast_const());
-    }
-
-    // SAFETY:
-    // Invoking an unsafe windows api
-    // addresses_pointer must be cleaned up at the end
-    unsafe {
-        let mut addresses_pointer = null_mut::<MIB_UNICASTIPADDRESS_TABLE>();
-        GetUnicastIpAddressTable(AF_UNSPEC.0.try_into()?, addr_of_mut!(addresses_pointer))?;
-        if let Some(addresses) = addresses_pointer.as_ref() {
-            for index in 0..addresses.NumEntries.try_into()? {
-                let address = addresses.Table.get_unchecked(index);
-                match (
-                    sockaddr_inet_to_ip_addr(&address.Address),
-                    address.ValidLifetime,
-                ) {
-                    (Some(ip_address), lifetime) if lifetime != 0xffff_ffff => {
-                        state.add_address((address.InterfaceIndex, ip_address));
-                    }
-                    (_, _) => {}
+    };
+    ($table:ty,$getter:expr,$arg1:ty) => {
+        impl MibTable<$table> {
+            fn new(a1: $arg1) -> Result<Self, Box<dyn Error + Send + Sync>> {
+                // SAFETY:
+                // getter is an unsafe windows api that should be dropped with `FreeMibTable`
+                unsafe {
+                    let mut pointer = null_mut::<$table>();
+                    $getter(a1, addr_of_mut!(pointer))?;
+                    Ok(Self { pointer })
                 }
             }
         }
-        FreeMibTable(addresses_pointer.cast::<c_void>().cast_const());
-    }
+    };
+}
+create_mib_table_new!(MIB_IF_TABLE2, GetIfTable2);
+create_mib_table_new!(MIB_UNICASTIPADDRESS_TABLE, GetUnicastIpAddressTable, u16);
+create_mib_table_new!(MIB_IPFORWARD_TABLE2, GetIpForwardTable2, u16);
+/// Helper macro for creating `MibTable` iterator boilerplate
+macro_rules! create_mib_table_iterator {
+    ($table:ty,$row:ty) => {
+        impl<'a> IntoIterator for &'a MibTable<$table> {
+            type Item = &'a $row;
 
-    // SAFETY:
-    // Invoking an unsafe windows api
-    // routes_pointer must be cleaned up at the end
-    unsafe {
-        let mut routes_pointer = null_mut::<MIB_IPFORWARD_TABLE2>();
-        GetIpForwardTable2(AF_UNSPEC.0.try_into()?, addr_of_mut!(routes_pointer))?;
-        if let Some(routes) = routes_pointer.as_ref() {
-            'outer: for index in 0..routes.NumEntries.try_into()? {
-                let route = routes.Table.get_unchecked(index);
-                // when both elements of DestinationPrefix only contain zero(excluding the first byte of the prefix itself), the route is considered default.
-                if route.DestinationPrefix.PrefixLength != 0 {
-                    continue;
+            type IntoIter = MibTableIter<'a, $table>;
+
+            fn into_iter(self) -> Self::IntoIter {
+                MibTableIter {
+                    table: self,
+                    next_index: 0,
                 }
-                let prefix = addr_of!(route.DestinationPrefix.Prefix).cast::<u8>();
-                for prefix_index in 1..size_of_val(&route.DestinationPrefix.Prefix) {
-                    match prefix.offset(prefix_index.try_into()?).as_ref() {
-                        Some(prefix_element) => {
-                            if *prefix_element != 0 {
-                                continue 'outer;
-                            }
+            }
+        }
+        impl<'a> Iterator for MibTableIter<'a, $table> {
+            type Item = &'a $row;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                // SAFETY:
+                // dereferencing raw pointers but it's checked by NumEntries
+                unsafe {
+                    if self.next_index < (*self.table.pointer).NumEntries {
+                        if let Ok(next_index) = self.next_index.try_into() {
+                            let n = (*self.table.pointer)
+                                .Table
+                                .get_unchecked::<usize>(next_index);
+                            self.next_index = self.next_index.checked_add(1)?;
+                            Some(n)
+                        } else {
+                            None
                         }
-                        None => {
-                            continue 'outer;
-                        }
+                    } else {
+                        None
                     }
                 }
-                if let Some(gateway) = sockaddr_inet_to_ip_addr(&route.NextHop) {
-                    state.add_default_route((route.InterfaceIndex, gateway, route.Metric));
-                }
             }
         }
-        FreeMibTable(routes_pointer.cast::<c_void>().cast_const());
-    }
+    };
+}
+create_mib_table_iterator!(MIB_IF_TABLE2, MIB_IF_ROW2);
+create_mib_table_iterator!(MIB_UNICASTIPADDRESS_TABLE, MIB_UNICASTIPADDRESS_ROW);
+create_mib_table_iterator!(MIB_IPFORWARD_TABLE2, MIB_IPFORWARD_ROW2);
 
-    Ok(state)
+/// wrapper to check a windows address structure it's ip type
+fn sockaddr_inet_check_ip_type(address: SOCKADDR_INET, ip_type: ADDRESS_FAMILY) -> bool {
+    // SAFETY:
+    // accessing union's identifier field
+    ADDRESS_FAMILY(u32::from(unsafe { address.si_family })) == ip_type
+}
+
+/// Get the connectivity state from the system
+fn connectivity_from_system() -> Result<Connectivity, Box<dyn Error + Send + Sync>> {
+    let interfaces = MibTable::<MIB_IF_TABLE2>::new()?;
+    let addresses = MibTable::<MIB_UNICASTIPADDRESS_TABLE>::new(AF_UNSPEC.0.try_into()?)?;
+    let routes = MibTable::<MIB_IPFORWARD_TABLE2>::new(AF_UNSPEC.0.try_into()?)?;
+
+    let default_routes = routes.into_iter().filter(|route| {
+        route.DestinationPrefix.PrefixLength == 0
+            && route.DestinationPrefix.Prefix == SOCKADDR_INET::default()
+    });
+
+    let connectivity = interfaces
+        .into_iter()
+        .filter(|interface| {
+            #[allow(clippy::used_underscore_binding)]
+            return interface.InterfaceAndOperStatusFlags._bitfield & 1 == 1
+                && interface.Type != IF_TYPE_SOFTWARE_LOOPBACK
+                && interface.OperStatus == IfOperStatusUp;
+        })
+        .map(|interface| {
+            let interface_addresses = addresses
+                .into_iter()
+                .filter(|address| address.InterfaceIndex == interface.InterfaceIndex);
+            let mut ipv4_interface_addresses = interface_addresses.clone().filter(|address| {
+                sockaddr_inet_check_ip_type(address.Address, AF_INET)
+            });
+            let mut ipv6_interface_addresses = interface_addresses.clone().filter(|address| {
+                sockaddr_inet_check_ip_type(address.Address, AF_INET6)
+            });
+            let interface_default_routes = default_routes
+                .clone()
+                .filter(|route| route.InterfaceIndex == interface.InterfaceIndex);
+            let mut ipv4_interface_default_routes =
+                interface_default_routes.clone().filter(|route| {
+                    sockaddr_inet_check_ip_type(route.NextHop, AF_INET)
+                });
+            let mut ipv6_interface_default_routes =
+                interface_default_routes.clone().filter(|route| {
+                    sockaddr_inet_check_ip_type(route.NextHop, AF_INET6)
+                });
+
+            let ipv4 = match (
+                ipv4_interface_addresses.next(),
+                ipv4_interface_default_routes.next(),
+            ) {
+                (None, _) => ConnectivityState::None,
+                (Some(_), None) => ConnectivityState::Network,
+                (Some(_), Some(_)) => ConnectivityState::Internet,
+            };
+            let ipv6 = match (
+                ipv6_interface_addresses.next(),
+                ipv6_interface_default_routes.next(),
+            ) {
+                (None, _) => ConnectivityState::None,
+                (Some(_), None) => ConnectivityState::Network,
+                (Some(_), Some(_)) => ConnectivityState::Internet,
+            };
+
+            Connectivity { ipv4, ipv6 }
+        })
+        .reduce(|a, b| Connectivity {
+            ipv4: max(a.ipv4, b.ipv4),
+            ipv6: max(a.ipv6, b.ipv6),
+        });
+
+    Ok(connectivity.unwrap_or(Connectivity {
+        ipv4: ConnectivityState::None,
+        ipv6: ConnectivityState::None,
+    }))
 }
 
 /// the handler function for `connectivity_changed` that returns a result which writes better to read code.
@@ -146,8 +222,7 @@ unsafe fn handle_connectivity_changed(
             .state
             .lock()
             .map_err(|error| format!("failed to lock state: {error}"))?;
-        let new_state = interfaces_from_system()?;
-        let new_connectivity = new_state.connectivity();
+        let new_connectivity = connectivity_from_system()?;
         if *state != new_connectivity {
             debug!("emitting updated connectivity {new_connectivity:?}");
             sender_state
@@ -201,7 +276,7 @@ pub fn new() -> Result<
     Box<dyn Error + Send + Sync>,
 > {
     let (tx, rx) = unbounded_channel();
-    let connectivity = interfaces_from_system()?.connectivity();
+    let connectivity = connectivity_from_system()?;
     let sender_state = Box::pin(SenderState {
         tx: Mutex::new(tx),
         state: Mutex::new(connectivity),

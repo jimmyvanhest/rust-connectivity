@@ -7,7 +7,8 @@
     clippy::blanket_clippy_restriction_lints,
     clippy::implicit_return,
     clippy::missing_inline_in_public_items,
-    clippy::missing_trait_methods
+    clippy::missing_trait_methods,
+    clippy::single_char_lifetime_names
 )]
 
 #[cfg(target_os = "linux")]
