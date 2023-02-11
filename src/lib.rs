@@ -13,7 +13,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux"))]
 mod state;
 #[cfg(target_os = "windows")]
 mod windows;
