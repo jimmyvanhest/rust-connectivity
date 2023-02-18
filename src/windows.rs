@@ -148,8 +148,12 @@ fn connectivity_from_system() -> Result<Connectivity, Box<dyn Error + Send + Syn
     let routes = MibTable::<MIB_IPFORWARD_TABLE2>::new(AF_UNSPEC.0.try_into()?)?;
 
     let default_routes = routes.into_iter().filter(|route| {
+        let mut prefix_compare = SOCKADDR_INET::default();
+        unsafe {
+            prefix_compare.si_family = route.DestinationPrefix.Prefix.si_family;
+        }
         route.DestinationPrefix.PrefixLength == 0
-            && route.DestinationPrefix.Prefix == SOCKADDR_INET::default()
+            && route.DestinationPrefix.Prefix == prefix_compare
     });
 
     let connectivity = interfaces
@@ -164,23 +168,21 @@ fn connectivity_from_system() -> Result<Connectivity, Box<dyn Error + Send + Syn
             let interface_addresses = addresses
                 .into_iter()
                 .filter(|address| address.InterfaceIndex == interface.InterfaceIndex);
-            let mut ipv4_interface_addresses = interface_addresses.clone().filter(|address| {
-                sockaddr_inet_check_ip_type(address.Address, AF_INET)
-            });
-            let mut ipv6_interface_addresses = interface_addresses.clone().filter(|address| {
-                sockaddr_inet_check_ip_type(address.Address, AF_INET6)
-            });
+            let mut ipv4_interface_addresses = interface_addresses
+                .clone()
+                .filter(|address| sockaddr_inet_check_ip_type(address.Address, AF_INET));
+            let mut ipv6_interface_addresses = interface_addresses
+                .clone()
+                .filter(|address| sockaddr_inet_check_ip_type(address.Address, AF_INET6));
             let interface_default_routes = default_routes
                 .clone()
                 .filter(|route| route.InterfaceIndex == interface.InterfaceIndex);
-            let mut ipv4_interface_default_routes =
-                interface_default_routes.clone().filter(|route| {
-                    sockaddr_inet_check_ip_type(route.NextHop, AF_INET)
-                });
-            let mut ipv6_interface_default_routes =
-                interface_default_routes.clone().filter(|route| {
-                    sockaddr_inet_check_ip_type(route.NextHop, AF_INET6)
-                });
+            let mut ipv4_interface_default_routes = interface_default_routes
+                .clone()
+                .filter(|route| sockaddr_inet_check_ip_type(route.NextHop, AF_INET));
+            let mut ipv6_interface_default_routes = interface_default_routes
+                .clone()
+                .filter(|route| sockaddr_inet_check_ip_type(route.NextHop, AF_INET6));
 
             let ipv4 = match (
                 ipv4_interface_addresses.next(),
